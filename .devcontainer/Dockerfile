@@ -14,11 +14,11 @@ RUN apt-get update && apt-get install -y sudo && \
     apt-get clean
 
 # Set up oh-my-zsh for devuser
-RUN cp -r /root/.oh-my-zsh /home/devuser/.oh-my-zsh && \
-    cp /root/.zshrc /home/devuser/.zshrc && \
-    cp /root/.vimrc /home/devuser/.vimrc && \
-    cp /root/.tmux.conf /home/devuser/.tmux.conf && \
-    sed -i 's|/root/.oh-my-zsh|/home/devuser/.oh-my-zsh|g' /home/devuser/.zshrc && \
+RUN cp -r /root/.oh-my-zsh /home/devuser/.oh-my-zsh || true && \
+    cp /root/.zshrc /home/devuser/.zshrc || true && \
+    [ -f /root/.vimrc ] && cp /root/.vimrc /home/devuser/.vimrc && \
+    [ -f /root/.tmux.conf ] && cp /root/.tmux.conf /home/devuser/.tmux.conf && \
+    sed -i 's|/root/.oh-my-zsh|/home/devuser/.oh-my-zsh|g' /home/devuser/.zshrc || true && \
     chown -R devuser:devuser /home/devuser/
 
 # Set workspace directory and ownership
