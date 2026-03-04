@@ -35,7 +35,7 @@ case "$profile" in
     ;;
   default)
     target_script="$SCRIPT_DIR/launch_toolkit_default.sh"
-    resolved_cmd='python3 -m sglang.launch_server --model-path "$MODEL_PATH" --host "$HOST" --port "$PORT" --trust-remote-code --disable-radix-cache --attention-backend flashinfer --chunked-prefill-size 32768 --skip-server-warmup'
+    resolved_cmd='python3 -m sglang.launch_server --model-path "$MODEL_PATH" --host "$HOST" --port "$PORT" --trust-remote-code --disable-radix-cache --attention-backend flashinfer --chunked-prefill-size "$CHUNKED_PREFILL_SIZE" --skip-server-warmup [--mem-fraction-static "$MEM_FRACTION_STATIC" if set]'
     ;;
   *)
     echo "Invalid profile: $profile"
@@ -52,6 +52,10 @@ if [[ "$mode" == "status" ]]; then
   echo "[launch_profile] PORT=${PORT:-30000}"
   if [[ "$profile" == "safe" || "$profile" == "probe" ]]; then
     echo "[launch_profile] PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:256}"
+  fi
+  if [[ "$profile" == "default" ]]; then
+    echo "[launch_profile] CHUNKED_PREFILL_SIZE=${CHUNKED_PREFILL_SIZE:-32768}"
+    echo "[launch_profile] MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-<unset>}"
   fi
   echo "[launch_profile] command=$resolved_cmd"
   exit 0
