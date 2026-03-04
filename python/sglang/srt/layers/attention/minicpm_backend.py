@@ -445,7 +445,12 @@ class MiniCPMSparseBackend(AttentionBackend):
             cu_seqlen_q_sparse_tensor = F.pad(torch.cumsum(seqlen_q_sparse_tensor, dim=0, dtype=torch.int32), (1, 0))
             # metadata.cu_seqlens_q = torch.cat(cu_seqlens_q_list, dim=0)
             metadata.cu_seqlens_q_adjusted = cu_seqlen_q_sparse_tensor * self.heads_per_group
-            metadata.max_seqlen_q_adjusted = seqlen_q_sparse_tensor.max().item() * self.heads_per_group
+            if seqlen_q_sparse_tensor.numel() == 0:
+                metadata.max_seqlen_q_adjusted = 0
+            else:
+                metadata.max_seqlen_q_adjusted = (
+                    seqlen_q_sparse_tensor.max().item() * self.heads_per_group
+                )
         else:
             decode_metadata = self.sparse_metadata_builder.build_sparse_decode_metadata(
                 forward_batch=forward_batch,
@@ -1014,8 +1019,17 @@ class MiniCPMSparseBackend(AttentionBackend):
                 q_reshaped[ps : ps + len_, :, :] = t[0::2, :, :]
                 q_reshaped[ps + len_ : ps + 2 * len_, :, :] = t[1::2, :, :]
 
-                metadata.sparse_page_table[sparse_page_table_idx_start, : kv_len] = page_table[dense_bs, : kv_len] * 2
-                metadata.sparse_page_table[sparse_page_table_idx_start + 1, : kv_len] = page_table[dense_bs, : kv_len] * 2 + 1
+                copy_len = min(
+                    kv_len,
+                    metadata.sparse_page_table.shape[1],
+                    page_table.shape[1],
+                )
+                metadata.sparse_page_table[sparse_page_table_idx_start, :copy_len] = (
+                    page_table[dense_bs, :copy_len] * 2
+                )
+                metadata.sparse_page_table[
+                    sparse_page_table_idx_start + 1, :copy_len
+                ] = (page_table[dense_bs, :copy_len] * 2 + 1)
 
         metadata.sparse_cache_seqlens_int32 = (
             (metadata.sparse_page_table != 0)
