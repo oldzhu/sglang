@@ -50,6 +50,7 @@ This repository is used for SOAR 2026 optimization work on MiniCPM-SALA.
 - Whenever optimization/compliance decisions depend on competition rules, re-check the latest official pages first:
    - https://soar.openbmb.cn/competition
    - https://soar.openbmb.cn/toolkit
+- Before starting optimization/customization stages, explicitly review and refer to the `技术路径指引` section on the toolkit page to align with officially suggested technical directions.
 - If any conflict appears between prior assumptions and latest official text, follow the official pages and explicitly call out the update.
 
 ## Prioritization strategy

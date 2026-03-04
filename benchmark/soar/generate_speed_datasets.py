@@ -92,6 +92,7 @@ def write_dataset(
     out_lens = sample_by_bins(num_rows, out_bins, rnd)
 
     max_in, max_out, max_total = 0, 0, 0
+    total_in, total_out = 0, 0
 
     with path.open("w", encoding="utf-8") as f:
         for idx, (i_len, o_len) in enumerate(zip(in_lens, out_lens), start=1):
@@ -107,6 +108,8 @@ def write_dataset(
             max_in = max(max_in, i_len)
             max_out = max(max_out, o_len)
             max_total = max(max_total, i_len + o_len)
+            total_in += i_len
+            total_out += o_len
 
             row = make_row(i_len, o_len, idx)
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -116,12 +119,20 @@ def write_dataset(
         "max_output_tokens": max_out,
         "max_total_tokens": max_total,
         "budget": max_context_tokens - safety_margin,
+        "total_input_tokens": total_in,
+        "total_output_tokens": total_out,
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate local SOAR-style speed JSONL datasets")
     parser.add_argument("--output-dir", default="benchmark/soar/data")
+    parser.add_argument(
+        "--profile",
+        choices=["quick10", "balanced", "heavy"],
+        default="quick10",
+        help="Dataset profile. quick10 is for fast iteration (~10 min per tier depending hardware).",
+    )
     parser.add_argument(
         "--max-context-tokens",
         type=int,
@@ -146,32 +157,81 @@ def main() -> None:
         default=20000,
         help="Hard upper bound for output tokens per sample.",
     )
+    parser.add_argument("--rows-s1", type=int, default=0, help="Override row count for S1.")
+    parser.add_argument("--rows-s8", type=int, default=0, help="Override row count for S8.")
+    parser.add_argument("--rows-smax", type=int, default=0, help="Override row count for Smax.")
+    parser.add_argument(
+        "--estimate-input-tps",
+        type=float,
+        default=8000.0,
+        help="Estimated input token throughput for rough duration estimate.",
+    )
+    parser.add_argument(
+        "--estimate-output-tps",
+        type=float,
+        default=250.0,
+        help="Estimated output token throughput for rough duration estimate.",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Practical local benchmark distributions (lighter than official, but far better than smoke tests).
-    # Approximate official long-context tendencies while keeping runtime manageable.
-    input_bins = [
-        (0.25, (128, 1500)),
-        (0.20, (1500, 6000)),
-        (0.25, (6000, 18000)),
-        (0.20, (18000, 48000)),
-        (0.10, (48000, 90000)),
-    ]
-    output_bins = [
-        (0.40, (64, 500)),
-        (0.25, (500, 1800)),
-        (0.15, (1800, 3500)),
-        (0.12, (3500, 9000)),
-        (0.08, (9000, 18000)),
-    ]
+    if args.profile == "quick10":
+        input_bins = [
+            (0.40, (32, 320)),
+            (0.30, (320, 1000)),
+            (0.20, (1000, 2500)),
+            (0.10, (2500, 6000)),
+        ]
+        output_bins = [
+            (0.55, (32, 180)),
+            (0.30, (180, 600)),
+            (0.12, (600, 1200)),
+            (0.03, (1200, 2400)),
+        ]
+        default_rows = {"s1": 16, "s8": 24, "smax": 32}
+    elif args.profile == "balanced":
+        input_bins = [
+            (0.25, (128, 1500)),
+            (0.20, (1500, 6000)),
+            (0.25, (6000, 18000)),
+            (0.20, (18000, 48000)),
+            (0.10, (48000, 90000)),
+        ]
+        output_bins = [
+            (0.40, (64, 500)),
+            (0.25, (500, 1800)),
+            (0.15, (1800, 3500)),
+            (0.12, (3500, 9000)),
+            (0.08, (9000, 18000)),
+        ]
+        default_rows = {"s1": 96, "s8": 192, "smax": 320}
+    else:  # heavy
+        input_bins = [
+            (0.20, (256, 2000)),
+            (0.20, (2000, 8000)),
+            (0.25, (8000, 24000)),
+            (0.20, (24000, 64000)),
+            (0.15, (64000, 120000)),
+        ]
+        output_bins = [
+            (0.30, (128, 700)),
+            (0.25, (700, 2200)),
+            (0.20, (2200, 5000)),
+            (0.15, (5000, 12000)),
+            (0.10, (12000, 24000)),
+        ]
+        default_rows = {"s1": 128, "s8": 256, "smax": 384}
+
+    rows_s1 = args.rows_s1 if args.rows_s1 > 0 else default_rows["s1"]
+    rows_s8 = args.rows_s8 if args.rows_s8 > 0 else default_rows["s8"]
+    rows_smax = args.rows_smax if args.rows_smax > 0 else default_rows["smax"]
 
     # Separate files allow independent scaling by tier.
     s1_stats = write_dataset(
         out_dir / "speed_s1.jsonl",
-        num_rows=96,
+        num_rows=rows_s1,
         in_bins=input_bins,
         out_bins=output_bins,
         seed=202601,
@@ -182,7 +242,7 @@ def main() -> None:
     )
     s8_stats = write_dataset(
         out_dir / "speed_s8.jsonl",
-        num_rows=192,
+        num_rows=rows_s8,
         in_bins=input_bins,
         out_bins=output_bins,
         seed=202602,
@@ -193,7 +253,7 @@ def main() -> None:
     )
     smax_stats = write_dataset(
         out_dir / "speed_smax.jsonl",
-        num_rows=320,
+        num_rows=rows_smax,
         in_bins=input_bins,
         out_bins=output_bins,
         seed=202603,
@@ -203,18 +263,31 @@ def main() -> None:
         max_output_cap=args.max_output_cap,
     )
 
+    def _estimate_secs(stats: dict) -> float:
+        in_tps = max(args.estimate_input_tps, 1.0)
+        out_tps = max(args.estimate_output_tps, 1.0)
+        return stats["total_input_tokens"] / in_tps + stats["total_output_tokens"] / out_tps
+
+    s1_est = _estimate_secs(s1_stats)
+    s8_est = _estimate_secs(s8_stats)
+    smax_est = _estimate_secs(smax_stats)
+
     print(f"Generated datasets in {out_dir}")
+    print(f"Profile: {args.profile}")
     print(f"- {out_dir / 'speed_s1.jsonl'}")
     print(
-        f"  stats: max_in={s1_stats['max_input_tokens']}, max_out={s1_stats['max_output_tokens']}, max_total={s1_stats['max_total_tokens']}, budget={s1_stats['budget']}"
+        f"  stats: rows={rows_s1}, max_in={s1_stats['max_input_tokens']}, max_out={s1_stats['max_output_tokens']}, max_total={s1_stats['max_total_tokens']}, budget={s1_stats['budget']}, est_minutes={s1_est/60:.1f}"
     )
     print(f"- {out_dir / 'speed_s8.jsonl'}")
     print(
-        f"  stats: max_in={s8_stats['max_input_tokens']}, max_out={s8_stats['max_output_tokens']}, max_total={s8_stats['max_total_tokens']}, budget={s8_stats['budget']}"
+        f"  stats: rows={rows_s8}, max_in={s8_stats['max_input_tokens']}, max_out={s8_stats['max_output_tokens']}, max_total={s8_stats['max_total_tokens']}, budget={s8_stats['budget']}, est_minutes={s8_est/60:.1f}"
     )
     print(f"- {out_dir / 'speed_smax.jsonl'}")
     print(
-        f"  stats: max_in={smax_stats['max_input_tokens']}, max_out={smax_stats['max_output_tokens']}, max_total={smax_stats['max_total_tokens']}, budget={smax_stats['budget']}"
+        f"  stats: rows={rows_smax}, max_in={smax_stats['max_input_tokens']}, max_out={smax_stats['max_output_tokens']}, max_total={smax_stats['max_total_tokens']}, budget={smax_stats['budget']}, est_minutes={smax_est/60:.1f}"
+    )
+    print(
+        f"Estimated total time for all tiers: {(s1_est+s8_est+smax_est)/60:.1f} minutes (using input_tps={args.estimate_input_tps}, output_tps={args.estimate_output_tps})"
     )
 
 

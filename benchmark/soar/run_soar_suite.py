@@ -45,14 +45,31 @@ def run_and_capture(
 
 def parse_accuracy_from_text(text: str) -> Dict[str, Optional[float]]:
     patterns = {
-        "ori_accuracy": r"ori_accuracy[^0-9]*([0-9]+(?:\.[0-9]+)?)",
-        "overall_accuracy": r"overall_accuracy[^0-9]*([0-9]+(?:\.[0-9]+)?)",
+        "ori_accuracy": [
+            r"ori_accuracy[^0-9]*([0-9]+(?:\.[0-9]+)?)",
+            r"average\s*score[^0-9]*([0-9]+(?:\.[0-9]+)?)%?",
+            r"average\s*accuracy[^0-9]*([0-9]+(?:\.[0-9]+)?)%?",
+        ],
+        "overall_accuracy": [
+            r"overall_accuracy[^0-9]*([0-9]+(?:\.[0-9]+)?)",
+            r"overall\s*score[^0-9]*([0-9]+(?:\.[0-9]+)?)%?",
+            r"relative\s*score[^0-9]*([0-9]+(?:\.[0-9]+)?)%?",
+        ],
     }
     result: Dict[str, Optional[float]] = {"ori_accuracy": None, "overall_accuracy": None}
-    for key, pattern in patterns.items():
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match:
-            result[key] = float(match.group(1))
+
+    for key, pattern_list in patterns.items():
+        for pattern in pattern_list:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                result[key] = float(match.group(1))
+                break
+
+    if result["ori_accuracy"] is not None and result["overall_accuracy"] is None:
+        result["overall_accuracy"] = result["ori_accuracy"]
+    elif result["overall_accuracy"] is not None and result["ori_accuracy"] is None:
+        result["ori_accuracy"] = result["overall_accuracy"]
+
     return result
 
 
