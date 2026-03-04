@@ -7,6 +7,8 @@ import json
 import random
 from pathlib import Path
 
+from transformers import AutoTokenizer
+
 
 EN_PHRASES = [
     "Please summarize the following content in detail and preserve key numbers.",
@@ -25,21 +27,27 @@ ZH_PHRASES = [
 ]
 
 
-def make_text(target_tokens: int, zh_ratio: float, seed: int) -> str:
+def make_text(target_tokens: int, zh_ratio: float, seed: int, tokenizer) -> str:
     rnd = random.Random(seed)
-    words = []
-    while len(words) < target_tokens:
-        if rnd.random() < zh_ratio:
-            words.append(rnd.choice(ZH_PHRASES))
-        else:
-            words.append(rnd.choice(EN_PHRASES))
-    return " ".join(words[:target_tokens])
+    chunks = []
+    text = ""
+
+    # Build text until real tokenizer token length reaches target.
+    while True:
+        phrase = rnd.choice(ZH_PHRASES) if rnd.random() < zh_ratio else rnd.choice(EN_PHRASES)
+        chunks.append(phrase)
+        text = " ".join(chunks)
+        cur_tokens = len(tokenizer.encode(text, add_special_tokens=False))
+        if cur_tokens >= target_tokens:
+            break
+
+    return text
 
 
-def make_row(input_tokens: int, output_tokens: int, idx: int) -> dict:
+def make_row(input_tokens: int, output_tokens: int, idx: int, tokenizer) -> dict:
     zh_ratio = 0.35 if idx % 2 == 0 else 0.55
-    question = make_text(input_tokens, zh_ratio=zh_ratio, seed=idx * 17 + 11)
-    model_response = make_text(output_tokens, zh_ratio=zh_ratio, seed=idx * 19 + 23)
+    question = make_text(input_tokens, zh_ratio=zh_ratio, seed=idx * 17 + 11, tokenizer=tokenizer)
+    model_response = make_text(output_tokens, zh_ratio=zh_ratio, seed=idx * 19 + 23, tokenizer=tokenizer)
     return {"question": question, "model_response": model_response}
 
 
@@ -86,6 +94,7 @@ def write_dataset(
     safety_margin: int,
     min_output_tokens: int,
     max_output_cap: int,
+    tokenizer,
 ) -> dict:
     rnd = random.Random(seed)
     in_lens = sample_by_bins(num_rows, in_bins, rnd)
@@ -111,7 +120,7 @@ def write_dataset(
             total_in += i_len
             total_out += o_len
 
-            row = make_row(i_len, o_len, idx)
+            row = make_row(i_len, o_len, idx, tokenizer=tokenizer)
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     return {
@@ -127,6 +136,11 @@ def write_dataset(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate local SOAR-style speed JSONL datasets")
     parser.add_argument("--output-dir", default="benchmark/soar/data")
+    parser.add_argument(
+        "--model-path",
+        default="",
+        help="Tokenizer source model path/name. If unset, use OpenBMB/MiniCPM-SALA.",
+    )
     parser.add_argument(
         "--profile",
         choices=["quick10", "balanced", "heavy"],
@@ -176,6 +190,9 @@ def main() -> None:
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    tokenizer_source = args.model_path or "OpenBMB/MiniCPM-SALA"
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, trust_remote_code=True)
 
     if args.profile == "quick10":
         input_bins = [
@@ -239,6 +256,7 @@ def main() -> None:
         safety_margin=args.safety_margin,
         min_output_tokens=args.min_output_tokens,
         max_output_cap=args.max_output_cap,
+        tokenizer=tokenizer,
     )
     s8_stats = write_dataset(
         out_dir / "speed_s8.jsonl",
@@ -250,6 +268,7 @@ def main() -> None:
         safety_margin=args.safety_margin,
         min_output_tokens=args.min_output_tokens,
         max_output_cap=args.max_output_cap,
+        tokenizer=tokenizer,
     )
     smax_stats = write_dataset(
         out_dir / "speed_smax.jsonl",
@@ -261,6 +280,7 @@ def main() -> None:
         safety_margin=args.safety_margin,
         min_output_tokens=args.min_output_tokens,
         max_output_cap=args.max_output_cap,
+        tokenizer=tokenizer,
     )
 
     def _estimate_secs(stats: dict) -> float:
@@ -273,6 +293,7 @@ def main() -> None:
     smax_est = _estimate_secs(smax_stats)
 
     print(f"Generated datasets in {out_dir}")
+    print(f"Tokenizer source: {tokenizer_source}")
     print(f"Profile: {args.profile}")
     print(f"- {out_dir / 'speed_s1.jsonl'}")
     print(
