@@ -27,6 +27,35 @@ ZH_PHRASES = [
 ]
 
 
+def load_text_pool(source_jsonl: str, field: str) -> list[str]:
+    path = Path(source_jsonl)
+    if not path.exists():
+        raise FileNotFoundError(f"Source JSONL not found: {source_jsonl}")
+
+    pool: list[str] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            value = obj.get(field, "")
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                pool.append(text)
+
+    if not pool:
+        raise ValueError(
+            f"No usable text found in {source_jsonl} for field '{field}'"
+        )
+    return pool
+
+
 def make_text(target_tokens: int, zh_ratio: float, seed: int, tokenizer) -> str:
     rnd = random.Random(seed)
     chunks = []
@@ -44,10 +73,65 @@ def make_text(target_tokens: int, zh_ratio: float, seed: int, tokenizer) -> str:
     return text
 
 
-def make_row(input_tokens: int, output_tokens: int, idx: int, tokenizer) -> dict:
+def stretch_or_trim_to_tokens(
+    base_text: str,
+    target_tokens: int,
+    seed: int,
+    tokenizer,
+    zh_ratio: float,
+) -> str:
+    token_ids = tokenizer.encode(base_text, add_special_tokens=False)
+    if len(token_ids) >= target_tokens:
+        clipped_ids = token_ids[:target_tokens]
+        return tokenizer.decode(clipped_ids, skip_special_tokens=True)
+
+    rnd = random.Random(seed)
+    chunks = [base_text]
+    text = base_text
+    while len(tokenizer.encode(text, add_special_tokens=False)) < target_tokens:
+        phrase = rnd.choice(ZH_PHRASES) if rnd.random() < zh_ratio else rnd.choice(EN_PHRASES)
+        chunks.append(phrase)
+        text = " ".join(chunks)
+    return text
+
+
+def make_row(
+    input_tokens: int,
+    output_tokens: int,
+    idx: int,
+    tokenizer,
+    prompt_pool: list[str] | None = None,
+    response_pool: list[str] | None = None,
+) -> dict:
     zh_ratio = 0.35 if idx % 2 == 0 else 0.55
-    question = make_text(input_tokens, zh_ratio=zh_ratio, seed=idx * 17 + 11, tokenizer=tokenizer)
-    model_response = make_text(output_tokens, zh_ratio=zh_ratio, seed=idx * 19 + 23, tokenizer=tokenizer)
+    if prompt_pool:
+        base_prompt = prompt_pool[(idx - 1) % len(prompt_pool)]
+        question = stretch_or_trim_to_tokens(
+            base_prompt,
+            input_tokens,
+            seed=idx * 17 + 11,
+            tokenizer=tokenizer,
+            zh_ratio=zh_ratio,
+        )
+    else:
+        question = make_text(
+            input_tokens, zh_ratio=zh_ratio, seed=idx * 17 + 11, tokenizer=tokenizer
+        )
+
+    if response_pool:
+        base_resp = response_pool[(idx - 1) % len(response_pool)]
+        model_response = stretch_or_trim_to_tokens(
+            base_resp,
+            output_tokens,
+            seed=idx * 19 + 23,
+            tokenizer=tokenizer,
+            zh_ratio=zh_ratio,
+        )
+    else:
+        model_response = make_text(
+            output_tokens, zh_ratio=zh_ratio, seed=idx * 19 + 23, tokenizer=tokenizer
+        )
+
     return {"question": question, "model_response": model_response}
 
 
@@ -95,6 +179,8 @@ def write_dataset(
     min_output_tokens: int,
     max_output_cap: int,
     tokenizer,
+    prompt_pool: list[str] | None,
+    response_pool: list[str] | None,
 ) -> dict:
     rnd = random.Random(seed)
     in_lens = sample_by_bins(num_rows, in_bins, rnd)
@@ -120,7 +206,14 @@ def write_dataset(
             total_in += i_len
             total_out += o_len
 
-            row = make_row(i_len, o_len, idx, tokenizer=tokenizer)
+            row = make_row(
+                i_len,
+                o_len,
+                idx,
+                tokenizer=tokenizer,
+                prompt_pool=prompt_pool,
+                response_pool=response_pool,
+            )
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     return {
@@ -136,6 +229,27 @@ def write_dataset(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate local SOAR-style speed JSONL datasets")
     parser.add_argument("--output-dir", default="benchmark/soar/data")
+    parser.add_argument(
+        "--prompt-source",
+        choices=["synthetic", "public", "custom"],
+        default="synthetic",
+        help="Question source: synthetic phrases, public eval jsonl, or custom jsonl.",
+    )
+    parser.add_argument(
+        "--source-jsonl",
+        default="",
+        help="Path to public/custom JSONL source when prompt-source is public/custom.",
+    )
+    parser.add_argument(
+        "--source-prompt-field",
+        default="question",
+        help="Field name for prompt text in source JSONL.",
+    )
+    parser.add_argument(
+        "--source-response-field",
+        default="",
+        help="Optional field name for response seed text in source JSONL.",
+    )
     parser.add_argument(
         "--model-path",
         default="",
@@ -193,6 +307,17 @@ def main() -> None:
 
     tokenizer_source = args.model_path or "OpenBMB/MiniCPM-SALA"
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, trust_remote_code=True)
+
+    prompt_pool: list[str] | None = None
+    response_pool: list[str] | None = None
+    if args.prompt_source in ["public", "custom"]:
+        if not args.source_jsonl:
+            raise ValueError(
+                "--source-jsonl is required when --prompt-source is public/custom"
+            )
+        prompt_pool = load_text_pool(args.source_jsonl, args.source_prompt_field)
+        if args.source_response_field:
+            response_pool = load_text_pool(args.source_jsonl, args.source_response_field)
 
     if args.profile == "quick10":
         input_bins = [
@@ -257,6 +382,8 @@ def main() -> None:
         min_output_tokens=args.min_output_tokens,
         max_output_cap=args.max_output_cap,
         tokenizer=tokenizer,
+        prompt_pool=prompt_pool,
+        response_pool=response_pool,
     )
     s8_stats = write_dataset(
         out_dir / "speed_s8.jsonl",
@@ -269,6 +396,8 @@ def main() -> None:
         min_output_tokens=args.min_output_tokens,
         max_output_cap=args.max_output_cap,
         tokenizer=tokenizer,
+        prompt_pool=prompt_pool,
+        response_pool=response_pool,
     )
     smax_stats = write_dataset(
         out_dir / "speed_smax.jsonl",
@@ -281,6 +410,8 @@ def main() -> None:
         min_output_tokens=args.min_output_tokens,
         max_output_cap=args.max_output_cap,
         tokenizer=tokenizer,
+        prompt_pool=prompt_pool,
+        response_pool=response_pool,
     )
 
     def _estimate_secs(stats: dict) -> float:
@@ -294,6 +425,11 @@ def main() -> None:
 
     print(f"Generated datasets in {out_dir}")
     print(f"Tokenizer source: {tokenizer_source}")
+    print(f"Prompt source: {args.prompt_source}")
+    if prompt_pool is not None:
+        print(f"Prompt pool size: {len(prompt_pool)} from {args.source_jsonl}")
+    if response_pool is not None:
+        print(f"Response pool size: {len(response_pool)} from {args.source_jsonl}")
     print(f"Profile: {args.profile}")
     print(f"- {out_dir / 'speed_s1.jsonl'}")
     print(

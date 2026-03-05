@@ -17,8 +17,8 @@ python3 -m sglang.launch_server \
   --trust-remote-code \
   --disable-radix-cache \
   --attention-backend minicpm_flashinfer \
-  --chunked-prefill-size 8192 \
-  --max-prefill-tokens 16384 \
+  --chunked-prefill-size 32768 \
+  --max-prefill-tokens 32768 \
   --prefill-max-requests 1 \
   --max-running-requests 20 \
   --mem-fraction-static 0.84 \

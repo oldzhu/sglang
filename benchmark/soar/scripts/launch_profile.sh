@@ -31,7 +31,7 @@ case "$profile" in
     ;;
   probe)
     target_script="$SCRIPT_DIR/launch_perf_probe.sh"
-    resolved_cmd='python3 -m sglang.launch_server --model-path "$MODEL_PATH" --host "$HOST" --port "$PORT" --trust-remote-code --disable-radix-cache --attention-backend minicpm_flashinfer --chunked-prefill-size 8192 --max-prefill-tokens 16384 --prefill-max-requests 1 --max-running-requests 20 --mem-fraction-static 0.84 --schedule-conservativeness 1.0 --skip-server-warmup'
+    resolved_cmd='python3 -m sglang.launch_server --model-path "$MODEL_PATH" --host "$HOST" --port "$PORT" --trust-remote-code --disable-radix-cache --attention-backend minicpm_flashinfer --chunked-prefill-size 32768 --max-prefill-tokens 32768 --prefill-max-requests 1 --max-running-requests 20 --mem-fraction-static 0.84 --schedule-conservativeness 1.0 --skip-server-warmup'
     ;;
   default)
     target_script="$SCRIPT_DIR/launch_toolkit_default.sh"

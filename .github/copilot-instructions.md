@@ -53,6 +53,12 @@ This repository is used for SOAR 2026 optimization work on MiniCPM-SALA.
 - Before starting optimization/customization stages, explicitly review and refer to the `技术路径指引` section on the toolkit page to align with officially suggested technical directions.
 - If any conflict appears between prior assumptions and latest official text, follow the official pages and explicitly call out the update.
 
+## Submission preparation requirement (must enforce)
+
+- When the task involves preparing competition submission artifacts (e.g., `prepare_env.sh`, `prepare_model.sh`, `preprocess_model.py`, packaging layout), explicitly refer to and follow the latest `提交说明` section on:
+   - https://soar.openbmb.cn/toolkit
+- For submission-related customization, align scripts with official execution model and interfaces (including `prepare_env.sh` and `prepare_model.sh --input/--output` contract), and state any assumptions if local/fcloud environment differs from official runtime.
+
 ## Prioritization strategy
 
 1. Low-risk, high-impact runtime optimizations first.
