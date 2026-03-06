@@ -13,15 +13,16 @@ This repository is used for SOAR 2026 optimization work on MiniCPM-SALA.
      - test and benchmark commands
    - Wait for explicit user approval before editing code.
 
-2. **One change at a time**
-   - Make only one optimization change per iteration.
-   - Keep diffs focused and minimal.
+2. **One improving feature at a time**
+   - Each iteration should deliver one complete optimization feature (can include related updates across multiple files).
+   - Keep scope cohesive: all edits in the iteration must serve the same optimization objective.
+   - Avoid mixing unrelated goals in one iteration.
 
-3. **Bilingual documentation per change (required)**
+3. **Bilingual documentation per feature (required)**
    - For each approved change, create two documents:
      - English: `docs/soar_2026_changes/CHANGE_XXXX_<short_title>.en.md`
      - Chinese: `docs/soar_2026_changes/CHANGE_XXXX_<short_title>.zh.md`
-   - One document pair corresponds to exactly one code change.
+   - One document pair corresponds to exactly one optimization feature iteration.
 
 4. **Documentation must include**
    - Background and motivation
