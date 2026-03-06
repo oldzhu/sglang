@@ -36,9 +36,34 @@ export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --log-level info"
 bash prepare_model.sh --input <原始模型路径> --output <处理后模型路径>
 ```
 
-两个路径均由平台提供，选手无需关心容器内的具体挂载位置。本 demo 中仅做简单的模型文件复制，不做任何量化或转换。
+两个路径均由平台提供，选手无需关心容器内的具体挂载位置。
 
-实际参赛时，可以在 `preprocess_model.py` 中实现量化（GPTQ、AWQ 等）、剪枝、权重融合等预处理逻辑。
+本 demo 目前支持两种预处理模式：
+
+1. `copy`（默认）：仅复制模型文件
+2. `gptq`：使用 GPTQModel 执行离线 GPTQ 量化
+
+可通过环境变量控制 `gptq` 模式参数：
+
+```bash
+export SOAR_QUANT_MODE=gptq
+export SOAR_GPTQ_CALIBRATION_FILE=/path/to/calibration.jsonl
+export SOAR_GPTQ_CALIBRATION_FIELD=question
+export SOAR_GPTQ_CALIBRATION_SAMPLES=128
+export SOAR_GPTQ_BITS=4
+export SOAR_GPTQ_GROUP_SIZE=128
+export SOAR_GPTQ_BATCH_SIZE=2
+```
+
+执行：
+
+```bash
+bash prepare_model.sh --input <原始模型路径> --output <处理后模型路径>
+```
+
+说明：
+- `gptq` 模式要求可用 `gptqmodel` 依赖（可在 `prepare_env.sh` 中安装）。
+- 量化输出目录应包含 `quantize_config.json`，供 SGLang 加载 `--quantization gptq` 使用。
 
 ### `sglang/python/`
 
@@ -50,5 +75,5 @@ bash prepare_model.sh --input <原始模型路径> --output <处理后模型路�
 |---|---|
 | 安装额外 pip 包 | `prepare_env.sh` 中添加 `uv pip install xxx` |
 | 自定义推理参数 | `prepare_env.sh` 中修改 `SGLANG_SERVER_ARGS` |
-| GPTQ 量化 | `preprocess_model.py` 中实现 GPTQ 打包，`prepare_env.sh` 中追加 `--quantization gptq` |
+| GPTQ 量化 | `preprocess_model.py` 使用 GPTQModel 离线量化，`prepare_env.sh` 中追加 `--quantization gptq` |
 | 模型剪枝/蒸馏 | `preprocess_model.py` 中实现，输出到 `--output` 目录 |
