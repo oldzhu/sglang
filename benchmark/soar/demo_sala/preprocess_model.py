@@ -136,7 +136,6 @@ def run_gptq_quantization(
         quant_config,
         trust_remote_code=trust_remote_code,
         attn_implementation=attn_impl,
-        _attn_implementation=attn_impl,
     )
     model.quantize(calibration_texts, batch_size=batch_size)
 
