@@ -123,17 +123,20 @@ def run_gptq_quantization(
         os.environ.get("SOAR_TRUST_REMOTE_CODE", "true").strip().lower()
         in {"1", "true", "yes", "on"}
     )
+    attn_impl = os.environ.get("SOAR_GPTQ_ATTN_IMPL", "flash_attention_2").strip()
     print(
         "[preprocess] GPTQ start "
         f"bits={bits} group_size={group_size} "
         f"calibration_samples={len(calibration_texts)} batch_size={batch_size} "
-        f"trust_remote_code={trust_remote_code}"
+        f"trust_remote_code={trust_remote_code} attn_impl={attn_impl}"
     )
 
     model = GPTQModel.load(
         str(src),
         quant_config,
         trust_remote_code=trust_remote_code,
+        attn_implementation=attn_impl,
+        _attn_implementation=attn_impl,
     )
     model.quantize(calibration_texts, batch_size=batch_size)
 
