@@ -23,6 +23,10 @@ This repository is used for SOAR 2026 optimization work on MiniCPM-SALA.
      - English: `docs/soar_2026_changes/CHANGE_XXXX_<short_title>.en.md`
      - Chinese: `docs/soar_2026_changes/CHANGE_XXXX_<short_title>.zh.md`
    - One document pair corresponds to exactly one optimization feature iteration.
+    - If appending new content to an existing feature doc would be long, do not over-append in place. Create a new continuation document pair with the same base filename and an incremented numeric suffix before locale, for example:
+       - `docs/soar_2026_changes/CHANGE_0030_<short_title>_001.en.md`
+       - `docs/soar_2026_changes/CHANGE_0030_<short_title>_001.zh.md`
+    - Keep continuation EN/ZH docs synchronized with the same suffix number (`_001`, `_002`, ...).
 
 4. **Documentation must include**
    - Background and motivation
