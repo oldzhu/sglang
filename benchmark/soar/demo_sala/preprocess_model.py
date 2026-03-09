@@ -10,12 +10,13 @@ Modes:
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Iterable, List
+from typing import Any, Callable, Iterable, List, Optional
 
 
 def copy_model(src: Path, dst: Path) -> int:
@@ -99,6 +100,137 @@ def load_calibration_texts(path: Path, max_samples: int, text_field: str) -> Lis
     return samples
 
 
+def _env_truthy(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_csv_env(name: str, default: Optional[List[str]] = None) -> List[str]:
+    raw = os.environ.get(name, "")
+    if not raw.strip():
+        return list(default or [])
+
+    seen = set()
+    values: List[str] = []
+    for item in raw.split(","):
+        value = item.strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
+    return values
+
+
+def _call_with_supported_kwargs(
+    func: Callable[..., Any],
+    args: List[Any],
+    kwargs: dict,
+    optional_keys: List[str],
+) -> Any:
+    filtered = dict(kwargs)
+    try:
+        sig = inspect.signature(func)
+        accepted = set(sig.parameters.keys())
+        has_var_keyword = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in sig.parameters.values()
+        )
+        if not has_var_keyword:
+            for key in list(filtered.keys()):
+                if key not in accepted:
+                    filtered.pop(key, None)
+    except Exception:
+        pass
+
+    try:
+        return func(*args, **filtered)
+    except TypeError:
+        retry_kwargs = dict(filtered)
+        for key in optional_keys:
+            if key in retry_kwargs:
+                retry_kwargs.pop(key, None)
+                try:
+                    return func(*args, **retry_kwargs)
+                except TypeError:
+                    continue
+        raise
+
+
+def _include_value_for_attr(attr_name: str, modules: List[str]) -> Any:
+    if attr_name in {"inside_layer_modules", "modules_in_block_to_quantize"}:
+        return [modules]
+    return modules
+
+
+def _apply_quant_module_controls(
+    quant_config: Any,
+    include_modules: List[str],
+    exclude_modules: List[str],
+) -> dict:
+    include_candidates = [
+        "layer_modules",
+        "inside_layer_modules",
+        "modules",
+        "module_names",
+        "target_modules",
+        "linear_modules",
+        "include_modules",
+        "modules_to_quantize",
+        "modules_in_block_to_quantize",
+    ]
+    exclude_candidates = [
+        "exclude_modules",
+        "ignore_modules",
+        "skip_modules",
+        "modules_to_not_quantize",
+        "modules_not_to_quantize",
+    ]
+
+    applied_include: List[str] = []
+    applied_exclude: List[str] = []
+
+    include_annotations = getattr(type(quant_config), "__annotations__", {})
+    exclude_annotations = include_annotations
+
+    for name in include_candidates:
+        allow_attempt = hasattr(quant_config, name) or name in include_annotations
+        if not allow_attempt:
+            continue
+        try:
+            setattr(quant_config, name, _include_value_for_attr(name, include_modules))
+            applied_include.append(name)
+        except Exception:
+            continue
+
+    for name in exclude_candidates:
+        allow_attempt = hasattr(quant_config, name) or name in exclude_annotations
+        if not allow_attempt:
+            continue
+        try:
+            setattr(quant_config, name, exclude_modules)
+            applied_exclude.append(name)
+        except Exception:
+            continue
+
+    return {
+        "include_attrs": applied_include,
+        "exclude_attrs": applied_exclude,
+    }
+
+
+def _is_module_mismatch_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    patterns = [
+        "layer module item",
+        "not found in model",
+        "module mismatch",
+        "incompatible module",
+    ]
+    return any(pattern in text for pattern in patterns)
+
+
 def run_gptq_quantization(
     src: Path,
     dst: Path,
@@ -118,26 +250,106 @@ def run_gptq_quantization(
         text_field=calibration_field,
     )
 
+    default_include = [
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+        "mlp.gate_proj",
+        "mlp.up_proj",
+        "mlp.down_proj",
+    ]
+    default_exclude = ["self_attn.o_gate"]
+
+    layer_aware = _env_truthy("SOAR_GPTQ_LAYER_AWARE", default=True)
+    include_modules = _parse_csv_env("SOAR_GPTQ_INCLUDE_MODULES", default=default_include)
+    exclude_modules = _parse_csv_env("SOAR_GPTQ_EXCLUDE_MODULES", default=default_exclude)
+    exclude_set = set(exclude_modules)
+    include_modules = [module for module in include_modules if module not in exclude_set]
+
     quant_config = QuantizeConfig(bits=bits, group_size=group_size)
-    trust_remote_code = (
-        os.environ.get("SOAR_TRUST_REMOTE_CODE", "true").strip().lower()
-        in {"1", "true", "yes", "on"}
-    )
+    applied_controls = {"include_attrs": [], "exclude_attrs": []}
+    if layer_aware:
+        applied_controls = _apply_quant_module_controls(
+            quant_config,
+            include_modules=include_modules,
+            exclude_modules=exclude_modules,
+        )
+
+    trust_remote_code = _env_truthy("SOAR_TRUST_REMOTE_CODE", default=True)
     attn_impl = os.environ.get("SOAR_GPTQ_ATTN_IMPL", "flash_attention_2").strip()
     print(
         "[preprocess] GPTQ start "
         f"bits={bits} group_size={group_size} "
         f"calibration_samples={len(calibration_texts)} batch_size={batch_size} "
-        f"trust_remote_code={trust_remote_code} attn_impl={attn_impl}"
+        f"trust_remote_code={trust_remote_code} attn_impl={attn_impl} "
+        f"layer_aware={layer_aware} include={include_modules} exclude={exclude_modules} "
+        f"applied_include_attrs={applied_controls['include_attrs']} "
+        f"applied_exclude_attrs={applied_controls['exclude_attrs']}"
     )
 
-    model = GPTQModel.load(
-        str(src),
-        quant_config,
-        trust_remote_code=trust_remote_code,
-        attn_implementation=attn_impl,
+    load_kwargs = {
+        "trust_remote_code": trust_remote_code,
+        "attn_implementation": attn_impl,
+    }
+    model = _call_with_supported_kwargs(
+        GPTQModel.load,
+        [str(src), quant_config],
+        load_kwargs,
+        optional_keys=["attn_implementation"],
     )
-    model.quantize(calibration_texts, batch_size=batch_size)
+
+    try:
+        _call_with_supported_kwargs(
+            model.quantize,
+            [calibration_texts],
+            {"batch_size": batch_size},
+            optional_keys=["batch_size"],
+        )
+    except Exception as exc:
+        if not (layer_aware and _is_module_mismatch_error(exc)):
+            raise
+
+        retry_include = [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.o_proj",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+        ]
+        retry_exclude = ["self_attn.o_gate"]
+        print(
+            "[preprocess] GPTQ retry after module mismatch "
+            f"error={exc} retry_include={retry_include} retry_exclude={retry_exclude}"
+        )
+
+        retry_config = QuantizeConfig(bits=bits, group_size=group_size)
+        retry_controls = _apply_quant_module_controls(
+            retry_config,
+            include_modules=retry_include,
+            exclude_modules=retry_exclude,
+        )
+        print(
+            "[preprocess] GPTQ retry controls "
+            f"applied_include_attrs={retry_controls['include_attrs']} "
+            f"applied_exclude_attrs={retry_controls['exclude_attrs']}"
+        )
+
+        retry_model = _call_with_supported_kwargs(
+            GPTQModel.load,
+            [str(src), retry_config],
+            load_kwargs,
+            optional_keys=["attn_implementation"],
+        )
+        _call_with_supported_kwargs(
+            retry_model.quantize,
+            [calibration_texts],
+            {"batch_size": batch_size},
+            optional_keys=["batch_size"],
+        )
+        model = retry_model
 
     dst.mkdir(parents=True, exist_ok=True)
     model.save(str(dst))
@@ -221,12 +433,12 @@ def main() -> None:
             calibration_field=args.calibration_field,
             batch_size=args.gptq_batch_size,
         )
-        print(f"[preprocess] mode={mode} done — quantized model saved to {dst}")
+        print(f"[preprocess] mode={mode} done - quantized model saved to {dst}")
         return
 
     count = copy_model(src, dst)
 
-    print(f"[preprocess] mode={mode} done — copied {count} files from {src} to {dst}")
+    print(f"[preprocess] mode={mode} done - copied {count} files from {src} to {dst}")
 
 
 if __name__ == "__main__":
