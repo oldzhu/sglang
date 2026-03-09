@@ -13,6 +13,7 @@ import argparse
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -164,60 +165,15 @@ def _include_value_for_attr(attr_name: str, modules: List[str]) -> Any:
     return modules
 
 
-def _apply_quant_module_controls(
-    quant_config: Any,
-    include_modules: List[str],
-    exclude_modules: List[str],
-) -> dict:
-    include_candidates = [
-        "layer_modules",
-        "inside_layer_modules",
-        "modules",
-        "module_names",
-        "target_modules",
-        "linear_modules",
-        "include_modules",
-        "modules_to_quantize",
-        "modules_in_block_to_quantize",
-    ]
-    exclude_candidates = [
-        "exclude_modules",
-        "ignore_modules",
-        "skip_modules",
-        "modules_to_not_quantize",
-        "modules_not_to_quantize",
-    ]
+def _build_dynamic_rules(include_modules: List[str], exclude_modules: List[str]) -> dict:
+    del include_modules
+    dynamic = {}
 
-    applied_include: List[str] = []
-    applied_exclude: List[str] = []
+    for module in exclude_modules:
+        escaped = re.escape(module)
+        dynamic[rf"-:.*{escaped}.*"] = {}
 
-    include_annotations = getattr(type(quant_config), "__annotations__", {})
-    exclude_annotations = include_annotations
-
-    for name in include_candidates:
-        allow_attempt = hasattr(quant_config, name) or name in include_annotations
-        if not allow_attempt:
-            continue
-        try:
-            setattr(quant_config, name, _include_value_for_attr(name, include_modules))
-            applied_include.append(name)
-        except Exception:
-            continue
-
-    for name in exclude_candidates:
-        allow_attempt = hasattr(quant_config, name) or name in exclude_annotations
-        if not allow_attempt:
-            continue
-        try:
-            setattr(quant_config, name, exclude_modules)
-            applied_exclude.append(name)
-        except Exception:
-            continue
-
-    return {
-        "include_attrs": applied_include,
-        "exclude_attrs": applied_exclude,
-    }
+    return dynamic
 
 
 def _is_module_mismatch_error(exc: Exception) -> bool:
@@ -229,66 +185,6 @@ def _is_module_mismatch_error(exc: Exception) -> bool:
         "incompatible module",
     ]
     return any(pattern in text for pattern in patterns)
-
-
-def _sanitize_module_tree_node(node: Any, banned_leaf_names: set[str]) -> Any:
-    if isinstance(node, dict):
-        result = {}
-        for key, value in node.items():
-            sanitized = _sanitize_module_tree_node(value, banned_leaf_names)
-            if sanitized in (None, (), [], {}):
-                continue
-            result[key] = sanitized
-        return result
-
-    if isinstance(node, tuple):
-        values = []
-        for item in node:
-            sanitized = _sanitize_module_tree_node(item, banned_leaf_names)
-            if sanitized in (None, (), [], {}):
-                continue
-            values.append(sanitized)
-        return tuple(values)
-
-    if isinstance(node, list):
-        values = []
-        for item in node:
-            sanitized = _sanitize_module_tree_node(item, banned_leaf_names)
-            if sanitized in (None, (), [], {}):
-                continue
-            values.append(sanitized)
-        return values
-
-    if isinstance(node, str) and node in banned_leaf_names:
-        return None
-
-    return node
-
-
-def _sanitize_model_module_tree(model: Any, exclude_modules: List[str]) -> None:
-    banned_leaf_names = {name.split(".")[-1] for name in exclude_modules}
-    if not banned_leaf_names:
-        return
-
-    original_tree = getattr(model, "module_tree", None)
-    if original_tree is not None:
-        sanitized_tree = _sanitize_module_tree_node(original_tree, banned_leaf_names)
-        if sanitized_tree != original_tree:
-            print(
-                "[preprocess] Sanitizing model.module_tree "
-                f"exclude={exclude_modules} before={original_tree} after={sanitized_tree}"
-            )
-            model.module_tree = sanitized_tree
-
-    original_overrides = getattr(model, "module_tree_overrides", None)
-    if original_overrides is not None:
-        sanitized_overrides = _sanitize_module_tree_node(original_overrides, banned_leaf_names)
-        if sanitized_overrides != original_overrides:
-            print(
-                "[preprocess] Sanitizing model.module_tree_overrides "
-                f"exclude={exclude_modules} before={original_overrides} after={sanitized_overrides}"
-            )
-            model.module_tree_overrides = sanitized_overrides
 
 
 def run_gptq_quantization(
@@ -327,14 +223,8 @@ def run_gptq_quantization(
     exclude_set = set(exclude_modules)
     include_modules = [module for module in include_modules if module not in exclude_set]
 
-    quant_config = QuantizeConfig(bits=bits, group_size=group_size)
-    applied_controls = {"include_attrs": [], "exclude_attrs": []}
-    if layer_aware:
-        applied_controls = _apply_quant_module_controls(
-            quant_config,
-            include_modules=include_modules,
-            exclude_modules=exclude_modules,
-        )
+    dynamic_rules = _build_dynamic_rules(include_modules, exclude_modules) if layer_aware else None
+    quant_config = QuantizeConfig(bits=bits, group_size=group_size, dynamic=dynamic_rules)
 
     trust_remote_code = _env_truthy("SOAR_TRUST_REMOTE_CODE", default=True)
     attn_impl = os.environ.get("SOAR_GPTQ_ATTN_IMPL", "flash_attention_2").strip()
@@ -344,8 +234,7 @@ def run_gptq_quantization(
         f"calibration_samples={len(calibration_texts)} batch_size={batch_size} "
         f"trust_remote_code={trust_remote_code} attn_impl={attn_impl} "
         f"layer_aware={layer_aware} include={include_modules} exclude={exclude_modules} "
-        f"applied_include_attrs={applied_controls['include_attrs']} "
-        f"applied_exclude_attrs={applied_controls['exclude_attrs']}"
+        f"dynamic_rules={dynamic_rules}"
     )
 
     load_kwargs = {
@@ -359,7 +248,13 @@ def run_gptq_quantization(
         optional_keys=["attn_implementation"],
     )
     if layer_aware:
-        _sanitize_model_module_tree(model, exclude_modules)
+        try:
+            print(
+                "[preprocess] GPTQ resolved modules "
+                f"simple_layer_modules={model.simple_layer_modules(model.model.config, model.quantize_config)}"
+            )
+        except Exception as debug_exc:
+            print(f"[preprocess] GPTQ module debug unavailable: {debug_exc}")
 
     try:
         _call_with_supported_kwargs(
@@ -387,16 +282,15 @@ def run_gptq_quantization(
             f"error={exc} retry_include={retry_include} retry_exclude={retry_exclude}"
         )
 
-        retry_config = QuantizeConfig(bits=bits, group_size=group_size)
-        retry_controls = _apply_quant_module_controls(
-            retry_config,
-            include_modules=retry_include,
-            exclude_modules=retry_exclude,
+        retry_dynamic = _build_dynamic_rules(retry_include, retry_exclude)
+        retry_config = QuantizeConfig(
+            bits=bits,
+            group_size=group_size,
+            dynamic=retry_dynamic,
         )
         print(
-            "[preprocess] GPTQ retry controls "
-            f"applied_include_attrs={retry_controls['include_attrs']} "
-            f"applied_exclude_attrs={retry_controls['exclude_attrs']}"
+            "[preprocess] GPTQ retry dynamic "
+            f"dynamic_rules={retry_dynamic}"
         )
 
         retry_model = _call_with_supported_kwargs(
@@ -405,7 +299,13 @@ def run_gptq_quantization(
             load_kwargs,
             optional_keys=["attn_implementation"],
         )
-        _sanitize_model_module_tree(retry_model, retry_exclude)
+        try:
+            print(
+                "[preprocess] GPTQ retry resolved modules "
+                f"simple_layer_modules={retry_model.simple_layer_modules(retry_model.model.config, retry_model.quantize_config)}"
+            )
+        except Exception as debug_exc:
+            print(f"[preprocess] GPTQ retry module debug unavailable: {debug_exc}")
         _call_with_supported_kwargs(
             retry_model.quantize,
             [calibration_texts],
