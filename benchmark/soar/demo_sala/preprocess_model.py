@@ -231,6 +231,66 @@ def _is_module_mismatch_error(exc: Exception) -> bool:
     return any(pattern in text for pattern in patterns)
 
 
+def _sanitize_module_tree_node(node: Any, banned_leaf_names: set[str]) -> Any:
+    if isinstance(node, dict):
+        result = {}
+        for key, value in node.items():
+            sanitized = _sanitize_module_tree_node(value, banned_leaf_names)
+            if sanitized in (None, (), [], {}):
+                continue
+            result[key] = sanitized
+        return result
+
+    if isinstance(node, tuple):
+        values = []
+        for item in node:
+            sanitized = _sanitize_module_tree_node(item, banned_leaf_names)
+            if sanitized in (None, (), [], {}):
+                continue
+            values.append(sanitized)
+        return tuple(values)
+
+    if isinstance(node, list):
+        values = []
+        for item in node:
+            sanitized = _sanitize_module_tree_node(item, banned_leaf_names)
+            if sanitized in (None, (), [], {}):
+                continue
+            values.append(sanitized)
+        return values
+
+    if isinstance(node, str) and node in banned_leaf_names:
+        return None
+
+    return node
+
+
+def _sanitize_model_module_tree(model: Any, exclude_modules: List[str]) -> None:
+    banned_leaf_names = {name.split(".")[-1] for name in exclude_modules}
+    if not banned_leaf_names:
+        return
+
+    original_tree = getattr(model, "module_tree", None)
+    if original_tree is not None:
+        sanitized_tree = _sanitize_module_tree_node(original_tree, banned_leaf_names)
+        if sanitized_tree != original_tree:
+            print(
+                "[preprocess] Sanitizing model.module_tree "
+                f"exclude={exclude_modules} before={original_tree} after={sanitized_tree}"
+            )
+            model.module_tree = sanitized_tree
+
+    original_overrides = getattr(model, "module_tree_overrides", None)
+    if original_overrides is not None:
+        sanitized_overrides = _sanitize_module_tree_node(original_overrides, banned_leaf_names)
+        if sanitized_overrides != original_overrides:
+            print(
+                "[preprocess] Sanitizing model.module_tree_overrides "
+                f"exclude={exclude_modules} before={original_overrides} after={sanitized_overrides}"
+            )
+            model.module_tree_overrides = sanitized_overrides
+
+
 def run_gptq_quantization(
     src: Path,
     dst: Path,
@@ -298,6 +358,8 @@ def run_gptq_quantization(
         load_kwargs,
         optional_keys=["attn_implementation"],
     )
+    if layer_aware:
+        _sanitize_model_module_tree(model, exclude_modules)
 
     try:
         _call_with_supported_kwargs(
@@ -343,6 +405,7 @@ def run_gptq_quantization(
             load_kwargs,
             optional_keys=["attn_implementation"],
         )
+        _sanitize_model_module_tree(retry_model, retry_exclude)
         _call_with_supported_kwargs(
             retry_model.quantize,
             [calibration_texts],
