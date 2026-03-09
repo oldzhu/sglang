@@ -200,6 +200,10 @@ def run_gptq_quantization(
     # Import lazily so copy mode does not require gptq dependencies.
     from gptqmodel import GPTQModel, QuantizeConfig
 
+    from gptqmodel_minicpm_sala import register_minicpm_sala_gptq_model
+
+    register_minicpm_sala_gptq_model()
+
     calibration_texts = load_calibration_texts(
         calibration_file,
         max_samples=calibration_samples,
@@ -215,7 +219,7 @@ def run_gptq_quantization(
         "mlp.up_proj",
         "mlp.down_proj",
     ]
-    default_exclude = ["self_attn.o_gate"]
+    default_exclude = ["self_attn.o_gate", "self_attn.z_proj"]
 
     layer_aware = _env_truthy("SOAR_GPTQ_LAYER_AWARE", default=True)
     include_modules = _parse_csv_env("SOAR_GPTQ_INCLUDE_MODULES", default=default_include)
@@ -236,6 +240,7 @@ def run_gptq_quantization(
         f"layer_aware={layer_aware} include={include_modules} exclude={exclude_modules} "
         f"dynamic_rules={dynamic_rules}"
     )
+    print("[preprocess] GPTQ custom model support enabled for model_type=minicpm_sala")
 
     load_kwargs = {
         "trust_remote_code": trust_remote_code,
@@ -276,7 +281,7 @@ def run_gptq_quantization(
             "mlp.up_proj",
             "mlp.down_proj",
         ]
-        retry_exclude = ["self_attn.o_gate"]
+        retry_exclude = ["self_attn.o_gate", "self_attn.z_proj"]
         print(
             "[preprocess] GPTQ retry after module mismatch "
             f"error={exc} retry_include={retry_include} retry_exclude={retry_exclude}"
