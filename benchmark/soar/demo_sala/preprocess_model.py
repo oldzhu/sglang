@@ -340,7 +340,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--calibration-file",
-        default=os.environ.get("SOAR_GPTQ_CALIBRATION_FILE", ""),
+        default=os.environ.get(
+            "SOAR_GPTQ_CALIBRATION_FILE",
+            str(Path(__file__).resolve().parent / "perf_public_set.jsonl"),
+        ),
         help="JSONL calibration file path for GPTQ mode.",
     )
     parser.add_argument(
@@ -351,7 +354,7 @@ def main() -> None:
     parser.add_argument(
         "--calibration-samples",
         type=int,
-        default=int(os.environ.get("SOAR_GPTQ_CALIBRATION_SAMPLES", "128")),
+        default=int(os.environ.get("SOAR_GPTQ_CALIBRATION_SAMPLES", "32")),
         help="Maximum number of calibration samples.",
     )
     parser.add_argument(
