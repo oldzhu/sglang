@@ -445,7 +445,12 @@ class MiniCPMSparseBackend(AttentionBackend):
             cu_seqlen_q_sparse_tensor = F.pad(torch.cumsum(seqlen_q_sparse_tensor, dim=0, dtype=torch.int32), (1, 0))
             # metadata.cu_seqlens_q = torch.cat(cu_seqlens_q_list, dim=0)
             metadata.cu_seqlens_q_adjusted = cu_seqlen_q_sparse_tensor * self.heads_per_group
-            metadata.max_seqlen_q_adjusted = seqlen_q_sparse_tensor.max().item() * self.heads_per_group
+            if seqlen_q_sparse_tensor.numel() == 0:
+                metadata.max_seqlen_q_adjusted = 0
+            else:
+                metadata.max_seqlen_q_adjusted = (
+                    seqlen_q_sparse_tensor.max().item() * self.heads_per_group
+                )
         else:
             decode_metadata = self.sparse_metadata_builder.build_sparse_decode_metadata(
                 forward_batch=forward_batch,
