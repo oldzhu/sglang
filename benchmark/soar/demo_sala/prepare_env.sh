@@ -36,10 +36,10 @@ export SOAR_GPTQ_EXCLUDE_MODULES="${SOAR_GPTQ_EXCLUDE_MODULES:-self_attn.o_gate,
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:128,garbage_collection_threshold:0.6}"
 
 if [[ "$QUANT_MODE" == "gptq" ]]; then
-	export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --trust-remote-code --disable-radix-cache --attention-backend minicpm_flashinfer --chunked-prefill-size 32768 --max-prefill-tokens 32768 --prefill-max-requests 1 --max-running-requests 20 --mem-fraction-static 0.84 --schedule-conservativeness 1.0 --skip-server-warmup --dense-as-sparse --quantization gptq_marlin"
+	export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --trust-remote-code --disable-radix-cache --attention-backend minicpm_flashinfer --chunked-prefill-size 32768 --max-prefill-tokens 32768 --prefill-max-requests 1 --max-running-requests 20 --mem-fraction-static 0.84 --schedule-conservativeness 1.0 --skip-server-warmup --dense-as-sparse --quantization gptq_marlin --kv-cache-dtype fp8_e5m2 --force-dense-minicpm"
 fi
 
-export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --log-level info"
+# export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --log-level info"
 
 echo "[prepare_env] SOAR_QUANT_MODE=${QUANT_MODE}"
 echo "[prepare_env] SOAR_GPTQ_CALIBRATION_FILE=${SOAR_GPTQ_CALIBRATION_FILE}"
