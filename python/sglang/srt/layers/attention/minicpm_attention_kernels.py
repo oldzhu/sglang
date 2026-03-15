@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
@@ -178,6 +179,7 @@ class FlashInferKernel(AttentionKernel):
         # KV cache attributes
         self.kv_cache_dtype = model_runner.kv_cache_dtype
         self.data_type = self.kv_cache_dtype
+        self.model_dtype = model_runner.dtype
 
         # Model config attributes
         self.num_qo_heads = model_runner.model_config.num_attention_heads
@@ -185,8 +187,11 @@ class FlashInferKernel(AttentionKernel):
             get_tensor_model_parallel_world_size()
         )
         self.head_dim = model_runner.model_config.head_dim
-        # Query data type (same as KV cache dtype, but flashinfer uses separate parameters)
-        self.q_data_type = self.kv_cache_dtype
+        # Keep query tensors in model dtype even when KV cache is quantized.
+        self.q_data_type = self.model_dtype
+        self.prefill_backend = os.environ.get(
+            "SGLANG_MINICPM_FLASHINFER_PREFILL_BACKEND", "auto"
+        )
 
         # Create workspace buffers for flashinfer
         workspace_size = envs.SGLANG_FLASHINFER_WORKSPACE_SIZE.get()
@@ -237,7 +242,7 @@ class FlashInferKernel(AttentionKernel):
             self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
                 self.prefill_workspace,
                 self.kv_layout,
-                backend="fa2",
+                backend=self.prefill_backend,
             )
         return self.prefill_wrapper
 
@@ -473,6 +478,8 @@ class FlashInferKernel(AttentionKernel):
                     params.window_size[0] if params.window_size[0] != -1 else -1
                 ),
                 logits_soft_cap=params.softcap if params.softcap > 0 else None,
+                k_scale=layer.k_scale_float,
+                v_scale=layer.v_scale_float,
             )
         else:
             # Decode mode: use decode wrapper
@@ -481,6 +488,8 @@ class FlashInferKernel(AttentionKernel):
                 k_data,
                 sm_scale=params.softmax_scale,
                 logits_soft_cap=params.softcap if params.softcap > 0 else None,
+                k_scale=layer.k_scale_float,
+                v_scale=layer.v_scale_float,
             )
 
         return o

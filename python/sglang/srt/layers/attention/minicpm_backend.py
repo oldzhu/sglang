@@ -183,6 +183,7 @@ class MiniCPMSparseBackend(AttentionBackend):
         )
         self.kv_cache_dtype = model_runner.kv_cache_dtype
         self.kv_cache_dtype_str = model_runner.server_args.kv_cache_dtype
+        self.use_fp8_sparse_scratch = self.kv_cache_dtype_str.startswith("fp8")
         self.page_size = model_runner.page_size
         # MiniCPM does not support local attention
         self.use_mla = False
@@ -604,6 +605,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                     full_compressed_k1=compressed_k, # output
                     full_compressed_k2=compressed_k2, # output
                     max_context_length=self.max_context_len,
+                    scratch_only=self.use_fp8_sparse_scratch,
                 )
                 
                 cu_seqlens_k = metadata.cu_seqlens_k
@@ -654,6 +656,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 device=key_states.device,
                 max_context_length=self.max_context_len,
                 split_stage1=self.split_stage1,
+                scratch_only=self.use_fp8_sparse_scratch,
             )
 
             pt_k1, pt_k2 = 0, 0
@@ -731,6 +734,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                         full_compressed_k1=self.decode_cuda_graph_metadata["compress_k1"][:forward_batch.batch_size * self.max_context_len // self.k1_kernel_stride, :, :],
                         full_compressed_k2=self.decode_cuda_graph_metadata["compress_k2"][:forward_batch.batch_size * self.max_context_len // self.k2_kernel_stride, :, :],
                         max_context_length=self.max_context_len,
+                        scratch_only=self.use_fp8_sparse_scratch,
                     )
                 else:
                     get_compress_k_v2(
@@ -740,6 +744,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                         full_compressed_k1=self.decode_cuda_graph_metadata["compress_k1"][:forward_batch.batch_size * self.max_context_len // self.k1_kernel_stride, :, :],
                         full_compressed_k2=self.decode_cuda_graph_metadata["compress_k2"][:forward_batch.batch_size * self.max_context_len // self.k2_kernel_stride, :, :],
                         max_context_length=self.max_context_len,
+                        scratch_only=self.use_fp8_sparse_scratch,
                     )
             else:
                 compressed_k, compressed_k2 = allocate_and_compress_keys(
@@ -756,6 +761,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                     device=self.device,
                     max_context_length=self.max_context_len,
                     split_stage1=self.split_stage1,
+                    scratch_only=self.use_fp8_sparse_scratch,
                 )
 
             topk_metadata = self.sparse_metadata_builder.build_decode_topk_metadata(
@@ -816,6 +822,17 @@ class MiniCPMSparseBackend(AttentionBackend):
         compressed_cu_seqlens2=None,
         fused_kernel=None
     ):
+        # The sparse top-k scorer uses infllmv2/FlashAttention kernels that only
+        # accept fp16/bf16 inputs. Keep FP8 in the real KV cache, but bridge the
+        # sparse scoring path through bf16 when KV cache quantization is enabled.
+        if self.kv_cache_dtype_str.startswith("fp8"):
+            if query_layer.dtype != torch.bfloat16:
+                query_layer = query_layer.to(torch.bfloat16)
+            if compressed_k is not None and compressed_k.dtype != torch.bfloat16:
+                compressed_k = compressed_k.to(torch.bfloat16)
+            if compressed_k2 is not None and compressed_k2.dtype != torch.bfloat16:
+                compressed_k2 = compressed_k2.to(torch.bfloat16)
+
         cache_lens = None
         if max_seqlen_in_batch_k > max_seqlen_in_batch_q:
             if max_seqlen_in_batch_q == 1:
@@ -934,9 +951,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                 descale_shape = (forward_batch.batch_size, layer.tp_k_head_num)
                 k_descale = layer.k_scale.expand(descale_shape)
                 v_descale = layer.v_scale.expand(descale_shape)
-            q = q.to(self.kv_cache_dtype)
-            q_rope = q_rope.to(self.kv_cache_dtype) if q_rope is not None else None
-            k_rope = k_rope.to(self.kv_cache_dtype) if k_rope is not None else None
         # MiniCPM backend does not support cross attention or encoder-only attention
         causal = True
 
@@ -986,6 +1000,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 device=k.device,
                 max_context_length=self.max_context_len,
                 split_stage1=self.split_stage1,
+                scratch_only=self.use_fp8_sparse_scratch,
             )
 
         q_reshaped = q.contiguous().view(-1, layer.tp_q_head_num // 2, layer.head_dim)
@@ -1154,9 +1169,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                 descale_shape = (forward_batch.batch_size, layer.tp_k_head_num)
                 k_descale = layer.k_scale.expand(descale_shape)
                 v_descale = layer.v_scale.expand(descale_shape)
-            q = q.to(self.kv_cache_dtype)
-            q_rope = q_rope.to(self.kv_cache_dtype) if q_rope is not None else None
-            k_rope = k_rope.to(self.kv_cache_dtype) if k_rope is not None else None
         # Do multi-head attention (without cross-attention or local attention support)
 
         key_cache, value_cache = forward_batch.token_to_kv_pool.get_kv_buffer(
@@ -1281,9 +1293,8 @@ class MiniCPMSparseBackend(AttentionBackend):
             self.num_sparse_topk_tokens + self.page_size - 1
         ) // self.page_size
 
-        # Precompute kv_indptr for sparse mode (cache_seqlens is fixed)
-        # For sparse mode, kv_indptr[i] = i * num_sparse_topk_tokens
-        precomputed_kv_indptr = (
+        # Pre-allocate kv_indptr storage for FlashInfer CUDA graph planning.
+        placeholder_kv_indptr = (
             torch.arange(0, max_bs * 2 + 1, dtype=torch.int32, device=self.device)
             * self.num_sparse_topk_tokens
         )
@@ -1421,12 +1432,11 @@ class MiniCPMSparseBackend(AttentionBackend):
                     "k2.cu_total_compress_token_nums": torch.zeros(
                         max_bs + 1, dtype=torch.int32, device=self.device
                     ),
-                    # Flashinfer-specific tensors (pre-allocated for CUDA graph)
-                    # For sparse attention (tokens > 8192):
-                    # - batch_size is doubled (2 head groups)
-                    # - kv_indptr is PRECOMPUTED: [0, topk, 2*topk, ...]
-                    # - Buffers are updated each replay by flattening sparse_page_table
-                    "flashinfer_kv_indptr": precomputed_kv_indptr,
+                    # FlashInfer-specific tensors used by the decode wrapper in
+                    # CUDA graph mode. The captured graph rewrites the wrapper's
+                    # internal paged-KV buffers every layer, while replay updates
+                    # the planning buffers with the current sparse lengths.
+                    "flashinfer_kv_indptr": placeholder_kv_indptr,
                     "flashinfer_kv_indices": torch.zeros(
                         max_bs * 2 * self.num_sparse_topk_tokens,
                         dtype=torch.int32,
@@ -1458,30 +1468,10 @@ class MiniCPMSparseBackend(AttentionBackend):
     ):
         """Initialize forward metadata for capturing CUDA graph.
 
-        For FlashInfer sparse mode (tokens > 8192), uses wrapper state persistence pattern:
-
-        Key Challenge:
-        - sparse_page_table is computed DYNAMICALLY during forward() based on query vectors
-        - FlashInfer requires kv_indptr/kv_indices converted BEFORE CUDA graph replay
-        - Direct conversion fails because converted data becomes stale by replay time
-
-        Solution: Wrapper State Persistence Pattern
-        1. Create wrapper with BUFFER VIEWS (slices of pre-allocated tensors)
-        2. Store wrapper references (addresses) - NOT the tensor data
-        3. Before each replay: UPDATE UNDERLYING STORAGE at those addresses
-        4. Call fast_decode_plan() to sync wrapper's cached pointers/metadata
-        5. Wrapper accesses updated storage through same addresses
-
-        Example:
-        - Capture: wrapper = BatchDecodeWrapper(paged_kv_indptr_buffer=full[:bs+1], ...)
-        - Replay (before graph): full[:bs+1].copy_(new_data)  # Update storage
-        - Replay (before graph): fast_decode_plan(wrapper, ...)  # Sync pointers
-        - Graph execution: wrapper uses updated data via same addresses
-
-        For sparse mode:
-        - kv_indptr is PRECOMPUTED and static: [0, K, 2K, ..., bs*K]
-        - Only kv_indices needs updating per request
-        - 128x memory reduction: bs*max_num_pages -> bs*num_sparse_topk_tokens
+        For FlashInfer sparse mode (tokens > 8192), capture keeps a decode wrapper
+        bound to fixed storage slices. Replay refreshes the wrapper's planning
+        metadata with the current sparse cumulative lengths, and the captured
+        forward rewrites the wrapper's paged-KV buffers from sparse_page_table.
         """
         metadata = MiniCPMBackendMetadata()
 
@@ -1702,12 +1692,12 @@ class MiniCPMSparseBackend(AttentionBackend):
 
         Update Process (executed OUTSIDE CUDA graph):
         1. Retrieve wrapper stored during capture
-        2. Update underlying storage: flatten sparse_page_table into kv_indices
-        3. Call begin_forward() to sync wrapper's cached pointers/metadata
-        4. Synchronize GPU to ensure updates complete before graph replay
+        2. Refresh planning buffers with the current sparse cumulative lengths
+        3. Call begin_forward() so FlashInfer replans against the live batch shape
+        4. Synchronize GPU to ensure the plan is ready before graph replay
 
-        The wrapper holds addresses to pre-allocated buffers. By updating the underlying
-        tensor data at those addresses, the wrapper sees the fresh data without reallocation.
+        The captured graph later rewrites the wrapper's internal paged-KV buffers from
+        sparse_page_table using the same fixed storage addresses.
         """
         seq_lens = seq_lens[:bs]
         seq_lens_cpu = seq_lens_cpu[:bs] if seq_lens_cpu is not None else seq_lens
@@ -1768,7 +1758,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 kv_last_page_len_view = self.decode_cuda_graph_metadata[
                     "flashinfer_kv_last_page_len"
                 ][:sparse_bs]
-                kv_indptr_view[sparse_real_bs:].fill_(kv_indptr_view[-1])
+
                 kv_last_page_len_view[sparse_real_bs:].fill_(0)
 
                 # Retrieve the wrapper stored during capture

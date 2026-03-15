@@ -454,6 +454,10 @@ class MiniCPMDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        self.residual_scale = config.scale_depth / math.sqrt(
+            config.num_hidden_layers
+        )
+
     def _compute_topk(self, forward_batch, base_metadata, sparse_metadata):
         """Compute TopK indices for sparse attention.
 
@@ -484,26 +488,26 @@ class MiniCPMDecoderLayer(nn.Module):
         # Build sparse metadata (model-specific logic!)
 
         # Self Attention
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
         )
-        hidden_states = residual + hidden_states * (
-            self.config.scale_depth / math.sqrt(self.config.num_hidden_layers)
-        )
+        hidden_states = hidden_states * self.residual_scale
 
         # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states * (
-            self.config.scale_depth / math.sqrt(self.config.num_hidden_layers)
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual
         )
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = hidden_states * self.residual_scale
 
-        return hidden_states, None
+        return hidden_states, residual
 
 
 class MiniCPMModel(nn.Module):
@@ -557,7 +561,10 @@ class MiniCPMModel(nn.Module):
                 forward_batch,
                 residual,
             )
-        hidden_states = self.norm(hidden_states)
+        if residual is None:
+            hidden_states = self.norm(hidden_states)
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 

@@ -26,6 +26,8 @@ import triton
 from infllm_v2 import infllmv2_attn_stage1, max_pooling_1d_varlen
 
 from sglang.srt.layers.attention.minicpm_sparse_kernels import (
+    compress_k_to_scratch_kernel,
+    compress_k_to_scratch_kernel_padded,
     compress_k_complete_kernel_new,
     compress_k_complete_kernel_new_padded,
 )
@@ -141,6 +143,7 @@ def get_compress_k_v2(
     full_compressed_k1,
     full_compressed_k2,
     max_context_length,
+    scratch_only: bool = False,
 ):
     batch = len(forward_batch.req_pool_indices)
 
@@ -164,6 +167,47 @@ def get_compress_k_v2(
     # get key cache ptr, zero over head
     key_cache = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
     key_cache = key_cache.view(-1, layer.tp_k_head_num, layer.head_dim)
+
+    if scratch_only:
+        head_dim = layer.head_dim
+        block_size = triton.next_power_of_2(head_dim)
+        max_chunks_k1 = max(0, (max_context_length - k1_l) // k1_stride + 1)
+        max_chunks_k2 = max(0, (max_context_length - k2_l) // k2_stride + 1)
+        max_grid_chunks_k1 = min(max_chunks_k1, 1024)
+        max_grid_chunks_k2 = min(max_chunks_k2, 1024)
+
+        compress_k_to_scratch_kernel[(batch, max_grid_chunks_k1, layer.tp_k_head_num)](
+            key_cache,
+            metadata.page_table,
+            metadata.k1.total_compress_token_nums,
+            metadata.k1.cu_total_compress_token_nums,
+            full_compressed_k1,
+            batch,
+            metadata.page_table.shape[1],
+            layer.tp_k_head_num,
+            head_dim,
+            k1_l,
+            k1_stride,
+            block_size,
+            max_grid_chunks_k1,
+        )
+
+        compress_k_to_scratch_kernel[(batch, max_grid_chunks_k2, layer.tp_k_head_num)](
+            key_cache,
+            metadata.page_table,
+            metadata.k2.total_compress_token_nums,
+            metadata.k2.cu_total_compress_token_nums,
+            full_compressed_k2,
+            batch,
+            metadata.page_table.shape[1],
+            layer.tp_k_head_num,
+            head_dim,
+            k2_l,
+            k2_stride,
+            block_size,
+            max_grid_chunks_k2,
+        )
+        return
 
     ##################### prepare of computation ######################
 
@@ -277,6 +321,7 @@ def get_compress_k_v2_padded(
     full_compressed_k1,
     full_compressed_k2,
     max_context_length,
+    scratch_only: bool = False,
 ):
     """Padded layout version for debugging with reshape()."""
     batch = len(forward_batch.req_pool_indices)
@@ -288,6 +333,47 @@ def get_compress_k_v2_padded(
 
     key_cache = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
     key_cache = key_cache.view(-1, layer.tp_k_head_num, layer.head_dim)
+
+    if scratch_only:
+        head_dim = layer.head_dim
+        block_size = triton.next_power_of_2(head_dim)
+        max_chunks_k1 = max_context_length // k1_stride
+        max_chunks_k2 = max_context_length // k2_stride
+        max_grid_chunks_k1 = min(max_chunks_k1, 1024)
+        max_grid_chunks_k2 = min(max_chunks_k2, 1024)
+
+        compress_k_to_scratch_kernel_padded[(batch, max_grid_chunks_k1, layer.tp_k_head_num)](
+            key_cache,
+            metadata.page_table,
+            metadata.k1.total_compress_token_nums,
+            full_compressed_k1,
+            batch,
+            max_chunks_k1,
+            metadata.page_table.shape[1],
+            layer.tp_k_head_num,
+            head_dim,
+            k1_l,
+            k1_stride,
+            block_size,
+            max_grid_chunks_k1,
+        )
+
+        compress_k_to_scratch_kernel_padded[(batch, max_grid_chunks_k2, layer.tp_k_head_num)](
+            key_cache,
+            metadata.page_table,
+            metadata.k2.total_compress_token_nums,
+            full_compressed_k2,
+            batch,
+            max_chunks_k2,
+            metadata.page_table.shape[1],
+            layer.tp_k_head_num,
+            head_dim,
+            k2_l,
+            k2_stride,
+            block_size,
+            max_grid_chunks_k2,
+        )
+        return
 
     # deal with k1
     compress_k_core_new_padded(
@@ -344,6 +430,7 @@ def allocate_and_compress_keys(
     device: torch.device = None,
     max_context_length: int = 32768,
     split_stage1: bool = False,
+    scratch_only: bool = False,
 ):
     """Allocate compressed key tensors and run compression.
 
@@ -381,6 +468,7 @@ def allocate_and_compress_keys(
             full_compressed_k1,
             full_compressed_k2,
             max_context_length=max_context_length,
+            scratch_only=scratch_only,
         )
     else:
         get_compress_k_v2(
@@ -390,6 +478,7 @@ def allocate_and_compress_keys(
             full_compressed_k1,
             full_compressed_k2,
             max_context_length=max_context_length,
+            scratch_only=scratch_only,
         )
 
     return full_compressed_k1, full_compressed_k2

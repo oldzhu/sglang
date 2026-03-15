@@ -4,6 +4,117 @@ import triton.language as tl
 from functools import lru_cache
 
 
+@triton.jit
+def compress_k_to_scratch_kernel(
+    key_cache_ptr,
+    token_table_ptr,
+    total_compress_token_nums_ptr,
+    cu_total_compress_token_nums_ptr,
+    full_compressed_k_ptr,
+    batch_size,
+    token_table_cols,
+    head_num_k: tl.constexpr,
+    head_dim: tl.constexpr,
+    kernel_size: tl.constexpr,
+    kernel_stride: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    max_grid_chunks: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+    grid_chunk_idx = tl.program_id(1)
+    head_idx = tl.program_id(2)
+
+    if batch_idx >= batch_size or head_idx >= head_num_k:
+        return
+
+    total_chunks_in_seq = tl.load(total_compress_token_nums_ptr + batch_idx)
+    cu_total_start = tl.load(cu_total_compress_token_nums_ptr + batch_idx)
+
+    chunk_in_seq = grid_chunk_idx
+    while chunk_in_seq < total_chunks_in_seq:
+        acc = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        token_start = chunk_in_seq * kernel_stride
+
+        for token_offset in range(kernel_size):
+            token_y = token_start + token_offset
+            token_k_indices = tl.load(
+                token_table_ptr + batch_idx * token_table_cols + token_y
+            ).to(tl.int32)
+            key_base_offset = token_k_indices * head_num_k * head_dim + head_idx * head_dim
+            x = tl.load(
+                key_cache_ptr + key_base_offset + tl.arange(0, BLOCK_SIZE),
+                mask=tl.arange(0, BLOCK_SIZE) < head_dim,
+                other=0.0,
+            ).to(tl.float32)
+            acc += x
+
+        acc = acc / kernel_size
+        out_idx = cu_total_start + chunk_in_seq
+        out_offset = out_idx * head_num_k * head_dim + head_idx * head_dim
+        tl.store(
+            full_compressed_k_ptr + out_offset + tl.arange(0, BLOCK_SIZE),
+            acc,
+            mask=tl.arange(0, BLOCK_SIZE) < head_dim,
+        )
+
+        chunk_in_seq += max_grid_chunks
+
+
+@triton.jit
+def compress_k_to_scratch_kernel_padded(
+    key_cache_ptr,
+    token_table_ptr,
+    total_compress_token_nums_ptr,
+    full_compressed_k_ptr,
+    batch_size,
+    max_chunks_per_seq,
+    token_table_cols,
+    head_num_k: tl.constexpr,
+    head_dim: tl.constexpr,
+    kernel_size: tl.constexpr,
+    kernel_stride: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    max_grid_chunks: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+    grid_chunk_idx = tl.program_id(1)
+    head_idx = tl.program_id(2)
+
+    if batch_idx >= batch_size or head_idx >= head_num_k:
+        return
+
+    total_chunks_in_seq = tl.load(total_compress_token_nums_ptr + batch_idx)
+
+    chunk_in_seq = grid_chunk_idx
+    while chunk_in_seq < total_chunks_in_seq:
+        acc = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        token_start = chunk_in_seq * kernel_stride
+
+        for token_offset in range(kernel_size):
+            token_y = token_start + token_offset
+            token_k_indices = tl.load(
+                token_table_ptr + batch_idx * token_table_cols + token_y
+            ).to(tl.int32)
+            key_base_offset = token_k_indices * head_num_k * head_dim + head_idx * head_dim
+            x = tl.load(
+                key_cache_ptr + key_base_offset + tl.arange(0, BLOCK_SIZE),
+                mask=tl.arange(0, BLOCK_SIZE) < head_dim,
+                other=0.0,
+            ).to(tl.float32)
+            acc += x
+
+        acc = acc / kernel_size
+        out_idx = batch_idx * max_chunks_per_seq + chunk_in_seq
+        out_offset = out_idx * head_num_k * head_dim + head_idx * head_dim
+        tl.store(
+            full_compressed_k_ptr + out_offset + tl.arange(0, BLOCK_SIZE),
+            acc,
+            mask=tl.arange(0, BLOCK_SIZE) < head_dim,
+        )
+
+        chunk_in_seq += max_grid_chunks
+
+
 # TODO. Now only page size == 1 is supported. Consider extend to page size > 1
 @triton.jit
 def compress_k_complete_kernel_new(
@@ -661,7 +772,6 @@ def convert_sparse_to_flashinfer_pytorch(
             kv_indices[idx : idx + num_valid] = sparse_page_table[i, :num_valid]
             idx += num_valid
 
-    # Fill kv_last_page_len with ones
     kv_last_page_len.fill_(1)
 
     return kv_indptr, kv_indices, kv_last_page_len

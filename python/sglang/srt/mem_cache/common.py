@@ -552,8 +552,17 @@ def alloc_for_decode(batch: ScheduleBatch, token_per_req: int) -> Tuple[torch.Te
             if batch.token_num_sparse_k1_cpu[i] > 0:
                 seq_len = batch.seq_lens_cpu[i].item()
                 k1_len = (seq_len - k1_kernel_size) // k1_kernel_stride + 1 if seq_len >= k1_kernel_size else 0
+                k1_end = batch.token_num_sparse_k1_cpu[i] + k1_len
+                # Temporary debugging guard for sparse decode metadata corruption.
+                # Remove after the FP8 decode crash is fully resolved and re-benchmark.
+                if k1_end > batch.req_to_token_pool.req_to_sparse_k1_token.shape[1]:
+                    raise RuntimeError(
+                        f"Sparse k1 decode write overflow: req_idx={batch.req_pool_indices[i].item()}, "
+                        f"k1_len={k1_len}, token_num_sparse_k1={batch.token_num_sparse_k1_cpu[i].item()}, "
+                        f"table_width={batch.req_to_token_pool.req_to_sparse_k1_token.shape[1]}"
+                    )
                 batch.req_to_token_pool.write_sparse_k1(
-                    (batch.req_pool_indices[i], (k1_len, batch.token_num_sparse_k1_cpu[i] + k1_len)),
+                    (batch.req_pool_indices[i], slice(k1_len, k1_end)),
                     sparse_k1_loc[pt : pt + batch.token_num_sparse_k1_cpu[i]].to(torch.int32),
                 )
                 pt += batch.token_num_sparse_k1_cpu[i]
@@ -565,8 +574,17 @@ def alloc_for_decode(batch: ScheduleBatch, token_per_req: int) -> Tuple[torch.Te
             if batch.token_num_sparse_k2_cpu[i] > 0:
                 seq_len = batch.seq_lens_cpu[i].item()
                 k2_len = (seq_len - k2_kernel_size) // k2_kernel_stride + 1 if seq_len >= k2_kernel_size else 0
+                k2_end = batch.token_num_sparse_k2_cpu[i] + k2_len
+                # Temporary debugging guard for sparse decode metadata corruption.
+                # Remove after the FP8 decode crash is fully resolved and re-benchmark.
+                if k2_end > batch.req_to_token_pool.req_to_sparse_k2_token.shape[1]:
+                    raise RuntimeError(
+                        f"Sparse k2 decode write overflow: req_idx={batch.req_pool_indices[i].item()}, "
+                        f"k2_len={k2_len}, token_num_sparse_k2={batch.token_num_sparse_k2_cpu[i].item()}, "
+                        f"table_width={batch.req_to_token_pool.req_to_sparse_k2_token.shape[1]}"
+                    )
                 batch.req_to_token_pool.write_sparse_k2(
-                    (batch.req_pool_indices[i], (k2_len, batch.token_num_sparse_k2_cpu[i] + k2_len)),
+                    (batch.req_pool_indices[i], slice(k2_len, k2_end)),
                     sparse_k2_loc[pt : pt + batch.token_num_sparse_k2_cpu[i]].to(torch.int32),
                 )
                 pt += batch.token_num_sparse_k2_cpu[i]
