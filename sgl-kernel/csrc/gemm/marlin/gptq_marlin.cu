@@ -24,6 +24,9 @@
 #endif
 
 #include <cstdio>
+#include <limits>
+#include <mutex>
+#include <unordered_map>
 
 #include "kernel.h"
 #include "marlin_template.h"
@@ -186,6 +189,64 @@ typedef struct {
   thread_config_t tb_cfg;
 } exec_config_t;
 
+typedef struct {
+  exec_config_t exec_cfg;
+  int cache_size;
+  int occupancy_blocks_per_sm;
+  bool from_cache;
+  double score;
+} selected_exec_config_t;
+
+struct marlin_exec_config_key_t {
+  int q_type_id;
+  int prob_m;
+  int prob_n;
+  int prob_k;
+  int thread_m_blocks;
+  int num_bits;
+  int group_size;
+  int max_shared_mem;
+  int sms;
+  bool m_block_size_8;
+  bool has_act_order;
+  bool is_k_full;
+  bool has_zp;
+  bool is_zp_float;
+
+  bool operator==(marlin_exec_config_key_t const& other) const {
+    return q_type_id == other.q_type_id && prob_m == other.prob_m && prob_n == other.prob_n && prob_k == other.prob_k &&
+           thread_m_blocks == other.thread_m_blocks && num_bits == other.num_bits && group_size == other.group_size &&
+           max_shared_mem == other.max_shared_mem && sms == other.sms && m_block_size_8 == other.m_block_size_8 &&
+           has_act_order == other.has_act_order && is_k_full == other.is_k_full && has_zp == other.has_zp &&
+           is_zp_float == other.is_zp_float;
+  }
+};
+
+struct marlin_exec_config_key_hash_t {
+  size_t operator()(marlin_exec_config_key_t const& key) const {
+    size_t seed = 0;
+    auto hash_combine = [&seed](auto const& value) {
+      seed ^= std::hash<std::decay_t<decltype(value)>>{}(value) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+    };
+
+    hash_combine(key.q_type_id);
+    hash_combine(key.prob_m);
+    hash_combine(key.prob_n);
+    hash_combine(key.prob_k);
+    hash_combine(key.thread_m_blocks);
+    hash_combine(key.num_bits);
+    hash_combine(key.group_size);
+    hash_combine(key.max_shared_mem);
+    hash_combine(key.sms);
+    hash_combine(key.m_block_size_8);
+    hash_combine(key.has_act_order);
+    hash_combine(key.is_k_full);
+    hash_combine(key.has_zp);
+    hash_combine(key.is_zp_float);
+    return seed;
+  }
+};
+
 bool is_sm120_or_later_device(int dev) {
   int major = 0;
   cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
@@ -219,7 +280,10 @@ void log_sm120_exec_config_once(
     thread_config_t const& th_config,
     int prob_m,
     int prob_n,
-    int prob_k) {
+    int prob_k,
+    bool from_cache,
+    int occupancy_blocks_per_sm,
+    double score) {
   static bool logged = false;
   if (logged) {
     return;
@@ -227,16 +291,69 @@ void log_sm120_exec_config_once(
 
   std::fprintf(
       stderr,
-      "[sgl-kernel] SM120 Marlin auto-config enabled: M=%d N=%d K=%d thread_m_blocks=%d thread_n=%d thread_k=%d num_threads=%d\n",
+      "[sgl-kernel] SM120 Marlin auto-config enabled: M=%d N=%d K=%d thread_m_blocks=%d thread_n=%d thread_k=%d num_threads=%d source=%s occupancy_blocks_per_sm=%d score=%.2f\n",
       prob_m,
       prob_n,
       prob_k,
       thread_m_blocks,
       th_config.thread_n,
       th_config.thread_k,
-      th_config.num_threads);
+      th_config.num_threads,
+      from_cache ? "cache" : "score",
+      occupancy_blocks_per_sm,
+      score);
   std::fflush(stderr);
   logged = true;
+}
+
+int get_occupancy_blocks_per_sm(
+    MarlinFuncPtr kernel,
+    int num_threads,
+    int dynamic_smem_bytes,
+    int max_shared_mem) {
+  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);
+
+  int blocks_per_sm = 1;
+  cudaError_t status = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &blocks_per_sm,
+      kernel,
+      num_threads,
+      dynamic_smem_bytes);
+  if (status != cudaSuccess || blocks_per_sm < 1) {
+    return 1;
+  }
+  return blocks_per_sm;
+}
+
+double score_sm120_candidate(
+    thread_config_t const& th_config,
+    int thread_m_blocks,
+    bool m_block_size_8,
+    int prob_m,
+    int prob_n,
+    int cache_size,
+    int max_shared_mem,
+    int sms,
+    int occupancy_blocks_per_sm) {
+  int tile_m = m_block_size_8 ? 8 : (thread_m_blocks * 16);
+  int m_tiles = div_ceil(prob_m, tile_m);
+  int n_tiles = prob_n / th_config.thread_n;
+  int total_tiles = m_tiles * n_tiles;
+  int occupancy_capacity = max(1, sms * occupancy_blocks_per_sm);
+
+  double fill_ratio = static_cast<double>(min(total_tiles, occupancy_capacity)) / static_cast<double>(occupancy_capacity);
+  double wave_ratio = static_cast<double>(total_tiles) / static_cast<double>(occupancy_capacity);
+  double m_coverage = static_cast<double>(prob_m) / static_cast<double>(m_tiles * tile_m);
+  double smem_fit = 1.0 - (static_cast<double>(cache_size) / static_cast<double>(max(1, max_shared_mem)));
+
+  double score = 0.0;
+  score += fill_ratio * 1000.0;
+  score += min(wave_ratio, 4.0) * 100.0;
+  score += m_coverage * 10.0;
+  score += smem_fit;
+  score += static_cast<double>(occupancy_blocks_per_sm) * 0.5;
+  score += static_cast<double>(total_tiles) * 0.01;
+  return score;
 }
 
 int get_scales_cache_size(
@@ -534,7 +651,7 @@ MarlinFuncPtr get_marlin_kernel(
 }
 
 template <typename scalar_t>
-exec_config_t determine_exec_config(
+selected_exec_config_t determine_exec_config(
     const sglang::ScalarType& q_type,
     int prob_m,
     int prob_n,
@@ -550,10 +667,131 @@ exec_config_t determine_exec_config(
     bool use_sm120_configs,
     int max_shared_mem,
     int sms) {
-  exec_config_t exec_cfg = exec_config_t{1, thread_config_t{-1, -1, -1}};
+  selected_exec_config_t selected_cfg = selected_exec_config_t{
+      exec_config_t{1, thread_config_t{-1, -1, -1}},
+      max_shared_mem,
+      1,
+      false,
+      -std::numeric_limits<double>::infinity()};
   thread_config_list_t thread_config_list = get_thread_config_list(use_sm120_configs, thread_m_blocks);
   thread_config_t* thread_configs = thread_config_list.configs;
   int thread_configs_size = thread_config_list.size;
+
+  if (use_sm120_configs) {
+    static std::mutex exec_config_cache_mutex;
+    static std::unordered_map<
+        marlin_exec_config_key_t,
+        selected_exec_config_t,
+        marlin_exec_config_key_hash_t>
+        exec_config_cache;
+
+    marlin_exec_config_key_t key = {
+        q_type.id(),
+        prob_m,
+        prob_n,
+        prob_k,
+        thread_m_blocks,
+        num_bits,
+        group_size,
+        max_shared_mem,
+        sms,
+        m_block_size_8,
+        has_act_order,
+        is_k_full,
+        has_zp,
+        is_zp_float};
+
+    {
+      std::lock_guard<std::mutex> lock(exec_config_cache_mutex);
+      auto it = exec_config_cache.find(key);
+      if (it != exec_config_cache.end()) {
+        selected_exec_config_t cached_cfg = it->second;
+        cached_cfg.from_cache = true;
+        return cached_cfg;
+      }
+    }
+
+    for (int i = 0; i < thread_configs_size; i++) {
+      thread_config_t th_config = thread_configs[i];
+
+      if (!is_valid_config(
+              th_config,
+              thread_m_blocks,
+              prob_m,
+              prob_n,
+              prob_k,
+              num_bits,
+              group_size,
+              has_act_order,
+              is_k_full,
+              has_zp,
+              is_zp_float,
+              max_shared_mem)) {
+        continue;
+      }
+
+      int cache_size = get_kernel_cache_size(
+          th_config,
+          thread_m_blocks,
+          prob_m,
+          prob_n,
+          prob_k,
+          num_bits,
+          group_size,
+          has_act_order,
+          is_k_full,
+          has_zp,
+          is_zp_float);
+
+      int group_blocks = 0;
+      if (!has_act_order) {
+        group_blocks = group_size == -1 ? -1 : group_size / 16;
+      }
+
+      auto kernel = get_marlin_kernel<scalar_t>(
+          q_type,
+          thread_m_blocks,
+          th_config.thread_n / 16,
+          th_config.thread_k / 16,
+          m_block_size_8,
+          has_act_order,
+          has_zp,
+          group_blocks,
+          th_config.num_threads,
+          is_zp_float);
+      if (kernel == MarlinDefault) continue;
+
+      int occupancy_blocks_per_sm = get_occupancy_blocks_per_sm(
+          kernel,
+          th_config.num_threads,
+          cache_size,
+          max_shared_mem);
+
+      double score = score_sm120_candidate(
+          th_config,
+          thread_m_blocks,
+          m_block_size_8,
+          prob_m,
+          prob_n,
+          cache_size,
+          max_shared_mem,
+          sms,
+          occupancy_blocks_per_sm);
+
+      if (score > selected_cfg.score) {
+        selected_cfg.exec_cfg = exec_config_t{1, th_config};
+        selected_cfg.cache_size = cache_size;
+        selected_cfg.occupancy_blocks_per_sm = occupancy_blocks_per_sm;
+        selected_cfg.score = score;
+      }
+    }
+
+    if (selected_cfg.exec_cfg.tb_cfg.thread_k != -1) {
+      std::lock_guard<std::mutex> lock(exec_config_cache_mutex);
+      exec_config_cache[key] = selected_cfg;
+    }
+    return selected_cfg;
+  }
 
   for (int i = 0; i < thread_configs_size; i++) {
     thread_config_t th_config = thread_configs[i];
@@ -606,14 +844,14 @@ exec_config_t determine_exec_config(
 
     if (kernel == MarlinDefault) continue;
 
-    // int m_tiles = div_ceil(prob_m, thread_m_blocks * 16);
-    // int n_tiles = prob_n / th_config.thread_n;
-    // int k_tiles = prob_k / th_config.thread_k;
-
-    return {1, th_config};
+    selected_cfg.exec_cfg = exec_config_t{1, th_config};
+    selected_cfg.cache_size = cache_size;
+    selected_cfg.occupancy_blocks_per_sm = 1;
+    selected_cfg.score = 0.0;
+    return selected_cfg;
   }
 
-  return exec_cfg;
+  return selected_cfg;
 }
 
 template <typename scalar_t>
@@ -736,16 +974,16 @@ void marlin_mm(
     int m_block_size_8 = prob_m_split <= 8;
 
     // Set thread config
-    exec_config_t exec_cfg;
+    selected_exec_config_t selected_cfg;
     thread_config_t thread_tfg;
     if (thread_k != -1 && thread_n != -1) {
       thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
-      exec_cfg = exec_config_t{1, thread_tfg};
+      selected_cfg = selected_exec_config_t{exec_config_t{1, thread_tfg}, max_shared_mem, 1, false, 0.0};
       TORCH_CHECK(prob_n % thread_n == 0, "prob_n = ", prob_n, " is not divisible by thread_n = ", thread_n);
       TORCH_CHECK(prob_k % thread_k == 0, "prob_k = ", prob_k, " is not divisible by thread_k = ", thread_k);
     } else {
       // Auto config
-      exec_cfg = determine_exec_config<scalar_t>(
+      selected_cfg = determine_exec_config<scalar_t>(
           q_type,
           prob_m_split,
           prob_n,
@@ -761,7 +999,7 @@ void marlin_mm(
             use_sm120_configs,
           max_shared_mem,
           sms);
-      thread_tfg = exec_cfg.tb_cfg;
+      thread_tfg = selected_cfg.exec_cfg.tb_cfg;
       if (thread_tfg.thread_k == -1 && max_thread_m_blocks > 1) {
         max_thread_m_blocks--;
         continue;
@@ -771,14 +1009,22 @@ void marlin_mm(
     int num_threads = thread_tfg.num_threads;
     thread_k = thread_tfg.thread_k;
     thread_n = thread_tfg.thread_n;
-    int blocks = sms * exec_cfg.blocks_per_sm;
-    if (exec_cfg.blocks_per_sm > 1) max_shared_mem_new = max_shared_mem / exec_cfg.blocks_per_sm - 1024;
+    int blocks = sms * selected_cfg.exec_cfg.blocks_per_sm;
+    if (selected_cfg.exec_cfg.blocks_per_sm > 1) max_shared_mem_new = max_shared_mem / selected_cfg.exec_cfg.blocks_per_sm - 1024;
 
     int thread_k_blocks = thread_k / 16;
     int thread_n_blocks = thread_n / 16;
 
-    if (use_sm120_configs) {
-      log_sm120_exec_config_once(thread_m_blocks, thread_tfg, prob_m_split, prob_n, prob_k);
+    if (use_sm120_configs && thread_k_init == -1 && thread_n_init == -1) {
+      log_sm120_exec_config_once(
+          thread_m_blocks,
+          thread_tfg,
+          prob_m_split,
+          prob_n,
+          prob_k,
+          selected_cfg.from_cache,
+          selected_cfg.occupancy_blocks_per_sm,
+          selected_cfg.score);
     }
 
     TORCH_CHECK(
