@@ -23,6 +23,8 @@
 #define MARLIN_NAMESPACE_NAME marlin
 #endif
 
+#include <cstdio>
+
 #include "kernel.h"
 #include "marlin_template.h"
 
@@ -154,10 +156,88 @@ thread_config_t large_batch_thread_configs[] = {
     {64, 128, 128},
     {128, 64, 128}};
 
+thread_config_t small_batch_thread_configs_sm120[] = {
+  // Ordered by priority for SM120-class GPUs.
+
+  // thread_k, thread_n, num_threads
+  {128, 256, 256},
+  {64, 256, 256},
+  {128, 128, 256},
+  {64, 128, 128},
+  {128, 64, 128}};
+
+thread_config_t large_batch_thread_configs_sm120[] = {
+  // Ordered by priority for SM120-class GPUs.
+
+  // thread_k, thread_n, num_threads
+  {128, 256, 256},
+  {64, 256, 256},
+  {128, 128, 256},
+  {64, 128, 128},
+  {128, 64, 128}};
+
+typedef struct {
+  thread_config_t* configs;
+  int size;
+} thread_config_list_t;
+
 typedef struct {
   int blocks_per_sm;
   thread_config_t tb_cfg;
 } exec_config_t;
+
+bool is_sm120_or_later_device(int dev) {
+  int major = 0;
+  cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+  return major >= 12;
+}
+
+thread_config_list_t get_thread_config_list(bool use_sm120_configs, int thread_m_blocks) {
+  if (use_sm120_configs) {
+    if (thread_m_blocks > 1) {
+      return thread_config_list_t{
+          large_batch_thread_configs_sm120,
+          static_cast<int>(sizeof(large_batch_thread_configs_sm120) / sizeof(thread_config_t))};
+    }
+    return thread_config_list_t{
+        small_batch_thread_configs_sm120,
+        static_cast<int>(sizeof(small_batch_thread_configs_sm120) / sizeof(thread_config_t))};
+  }
+
+  if (thread_m_blocks > 1) {
+    return thread_config_list_t{
+        large_batch_thread_configs,
+        static_cast<int>(sizeof(large_batch_thread_configs) / sizeof(thread_config_t))};
+  }
+  return thread_config_list_t{
+      small_batch_thread_configs,
+      static_cast<int>(sizeof(small_batch_thread_configs) / sizeof(thread_config_t))};
+}
+
+void log_sm120_exec_config_once(
+    int thread_m_blocks,
+    thread_config_t const& th_config,
+    int prob_m,
+    int prob_n,
+    int prob_k) {
+  static bool logged = false;
+  if (logged) {
+    return;
+  }
+
+  std::fprintf(
+      stderr,
+      "[sgl-kernel] SM120 Marlin auto-config enabled: M=%d N=%d K=%d thread_m_blocks=%d thread_n=%d thread_k=%d num_threads=%d\n",
+      prob_m,
+      prob_n,
+      prob_k,
+      thread_m_blocks,
+      th_config.thread_n,
+      th_config.thread_k,
+      th_config.num_threads);
+  std::fflush(stderr);
+  logged = true;
+}
 
 int get_scales_cache_size(
     thread_config_t const& th_config,
@@ -467,12 +547,13 @@ exec_config_t determine_exec_config(
     bool is_k_full,
     bool has_zp,
     bool is_zp_float,
+    bool use_sm120_configs,
     int max_shared_mem,
     int sms) {
   exec_config_t exec_cfg = exec_config_t{1, thread_config_t{-1, -1, -1}};
-  thread_config_t* thread_configs = thread_m_blocks > 1 ? large_batch_thread_configs : small_batch_thread_configs;
-  int thread_configs_size = thread_m_blocks > 1 ? sizeof(large_batch_thread_configs) / sizeof(thread_config_t)
-                                                : sizeof(small_batch_thread_configs) / sizeof(thread_config_t);
+  thread_config_list_t thread_config_list = get_thread_config_list(use_sm120_configs, thread_m_blocks);
+  thread_config_t* thread_configs = thread_config_list.configs;
+  int thread_configs_size = thread_config_list.size;
 
   for (int i = 0; i < thread_configs_size; i++) {
     thread_config_t th_config = thread_configs[i];
@@ -636,6 +717,7 @@ void marlin_mm(
   int max_shared_mem = 0;
   cudaDeviceGetAttribute(&max_shared_mem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
   TORCH_CHECK(max_shared_mem > 0);
+  bool use_sm120_configs = is_sm120_or_later_device(dev);
 
   int max_par = 16;
   if (prob_n <= 4096) max_par = 16 * 8;
@@ -676,6 +758,7 @@ void marlin_mm(
           is_k_full,
           has_zp,
           is_zp_float,
+            use_sm120_configs,
           max_shared_mem,
           sms);
       thread_tfg = exec_cfg.tb_cfg;
@@ -693,6 +776,10 @@ void marlin_mm(
 
     int thread_k_blocks = thread_k / 16;
     int thread_n_blocks = thread_n / 16;
+
+    if (use_sm120_configs) {
+      log_sm120_exec_config_once(thread_m_blocks, thread_tfg, prob_m_split, prob_n, prob_k);
+    }
 
     TORCH_CHECK(
         is_valid_config(

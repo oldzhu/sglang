@@ -3,6 +3,9 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLASH_ATTN_WHL="${SCRIPT_DIR}/flash_attn-2.8.3+cu128sm120-cp310-cp310-linux_x86_64.whl"
+shopt -s nullglob
+SGL_KERNEL_WHEELS=("${SCRIPT_DIR}"/sgl_kernel-*.whl "${SCRIPT_DIR}"/sgl-kernel-*.whl)
+shopt -u nullglob
 
 echo "[prepare_env] start $(date '+%F %T')"
 
@@ -16,6 +19,15 @@ if [[ ! -f "${FLASH_ATTN_WHL}" ]]; then
 fi
 
 uv pip install "${FLASH_ATTN_WHL}" --no-build-isolation -v
+
+if [[ "${#SGL_KERNEL_WHEELS[@]}" -ne 1 ]]; then
+	echo "[prepare_env] expected exactly one sgl-kernel wheel in ${SCRIPT_DIR}, found ${#SGL_KERNEL_WHEELS[@]}" >&2
+	printf '  %s\n' "${SGL_KERNEL_WHEELS[@]}" >&2
+	exit 1
+fi
+
+echo "[prepare_env] installing sgl-kernel wheel: ${SGL_KERNEL_WHEELS[0]}"
+uv pip install --force-reinstall --no-deps "${SGL_KERNEL_WHEELS[0]}" -v
 
 uv pip uninstall torchao
 uv pip install torchao==0.9.0
