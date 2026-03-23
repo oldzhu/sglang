@@ -1,0 +1,15 @@
+{
+  "name": "quick_screen_public_focus_20",
+  "description": "Fixed 20-row public subset for fast GPTQ calibration screening, centered on the currently weak mcq and qa public buckets.",
+  "source_file": "perf_public_set.jsonl",
+  "indices": [1, 2, 4, 8, 11, 17, 23, 25, 61, 63, 65, 66, 68, 70, 71, 76, 80, 81, 85, 90],
+  "target_task_length_buckets": [
+    "task=mcq|len_0_4k",
+    "task=qa|len_4k_32k",
+    "task=qa|len_32k_128k"
+  ],
+  "expected_task_counts": {
+    "mcq": 8,
+    "qa": 12
+  }
+}

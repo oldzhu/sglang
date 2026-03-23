@@ -13,11 +13,12 @@ import argparse
 import inspect
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 
 def copy_model(src: Path, dst: Path) -> int:
@@ -79,26 +80,218 @@ def _iter_jsonl(path: Path) -> Iterable[dict]:
             yield json.loads(line)
 
 
-def load_calibration_texts(path: Path, max_samples: int, text_field: str) -> List[str]:
+def _parse_int_env(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value.strip())
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got: {value}") from exc
+
+
+def _calibration_length_bucket(record: dict) -> str:
+    prompt_tokens = record.get("prompt_tokens")
+    if not isinstance(prompt_tokens, int):
+        return "len_unknown"
+    if prompt_tokens <= 4096:
+        return "len_0_4k"
+    if prompt_tokens <= 32768:
+        return "len_4k_32k"
+    if prompt_tokens <= 131072:
+        return "len_32k_128k"
+    return "len_128k_plus"
+
+
+def _calibration_bucket_key(
+    record: dict,
+    task_balance: bool,
+    use_prompt_tokens: bool,
+) -> str:
+    parts: List[str] = []
+    if task_balance:
+        parts.append(f"task={record.get('task', 'unknown')}")
+    if use_prompt_tokens:
+        parts.append(_calibration_length_bucket(record))
+    if not parts:
+        return "all"
+    return "|".join(parts)
+
+
+def _largest_remainder_allocate(capacities: Dict[str, int], total: int) -> Dict[str, int]:
+    allocation = {key: 0 for key in capacities}
+    if total <= 0:
+        return allocation
+
+    total_capacity = sum(capacities.values())
+    if total_capacity <= 0:
+        return allocation
+
+    fractional: List[Tuple[float, str]] = []
+    assigned = 0
+    for key, capacity in capacities.items():
+        if capacity <= 0:
+            continue
+        raw = total * capacity / total_capacity
+        whole = min(capacity, int(raw))
+        allocation[key] = whole
+        assigned += whole
+        fractional.append((raw - whole, key))
+
+    remaining = total - assigned
+    if remaining <= 0:
+        return allocation
+
+    fractional.sort(key=lambda item: (-item[0], item[1]))
+    for _, key in fractional:
+        if remaining <= 0:
+            break
+        if allocation[key] >= capacities[key]:
+            continue
+        allocation[key] += 1
+        remaining -= 1
+
+    return allocation
+
+
+def _select_calibration_records(records: List[dict], max_samples: int) -> Tuple[List[dict], dict]:
+    mode = os.environ.get("SOAR_GPTQ_CALIBRATION_SAMPLING", "sequential").strip().lower()
+    seed = _parse_int_env("SOAR_GPTQ_CALIBRATION_SEED", 20260320)
+    task_balance = _env_truthy("SOAR_GPTQ_CALIBRATION_TASK_BALANCE", default=True)
+    use_prompt_tokens = _env_truthy(
+        "SOAR_GPTQ_CALIBRATION_USE_PROMPT_TOKENS", default=True
+    )
+
+    if mode not in {"sequential", "shuffled", "stratified"}:
+        raise ValueError(
+            "SOAR_GPTQ_CALIBRATION_SAMPLING must be one of sequential, shuffled, stratified"
+        )
+
+    available = len(records)
+    if max_samples <= 0 or max_samples >= available:
+        selected = list(records)
+        summary = {
+            "mode": mode,
+            "seed": seed,
+            "available": available,
+            "selected": len(selected),
+            "task_balance": task_balance,
+            "use_prompt_tokens": use_prompt_tokens,
+            "selected_buckets": {"all": len(selected)},
+        }
+        return selected, summary
+
+    if mode == "sequential":
+        selected = list(records[:max_samples])
+        summary = {
+            "mode": mode,
+            "seed": seed,
+            "available": available,
+            "selected": len(selected),
+            "task_balance": task_balance,
+            "use_prompt_tokens": use_prompt_tokens,
+            "selected_buckets": {"all": len(selected)},
+        }
+        return selected, summary
+
+    rng = random.Random(seed)
+
+    if mode == "shuffled":
+        selected = list(records)
+        rng.shuffle(selected)
+        selected = selected[:max_samples]
+        summary = {
+            "mode": mode,
+            "seed": seed,
+            "available": available,
+            "selected": len(selected),
+            "task_balance": task_balance,
+            "use_prompt_tokens": use_prompt_tokens,
+            "selected_buckets": {"all": len(selected)},
+        }
+        return selected, summary
+
+    buckets: Dict[str, List[dict]] = {}
+    for record in records:
+        key = _calibration_bucket_key(record, task_balance, use_prompt_tokens)
+        buckets.setdefault(key, []).append(record)
+
+    bucket_items = sorted(buckets.items())
+    for _, bucket_records in bucket_items:
+        rng.shuffle(bucket_records)
+
+    base_counts = {key: 0 for key, _ in bucket_items}
+    if max_samples >= len(bucket_items):
+        for key, bucket_records in bucket_items:
+            if bucket_records:
+                base_counts[key] = 1
+    else:
+        ranked = sorted(bucket_items, key=lambda item: (-len(item[1]), item[0]))
+        for key, _ in ranked[:max_samples]:
+            base_counts[key] = 1
+
+    remaining = max_samples - sum(base_counts.values())
+    capacities = {
+        key: max(0, len(bucket_records) - base_counts[key])
+        for key, bucket_records in bucket_items
+    }
+    extra_counts = _largest_remainder_allocate(capacities, remaining)
+
+    selected = []
+    selected_buckets: Dict[str, int] = {}
+    for key, bucket_records in bucket_items:
+        take = min(len(bucket_records), base_counts[key] + extra_counts[key])
+        if take <= 0:
+            continue
+        selected.extend(bucket_records[:take])
+        selected_buckets[key] = take
+
+    if len(selected) < max_samples:
+        used_ids = {id(record) for record in selected}
+        leftovers = [record for record in records if id(record) not in used_ids]
+        rng.shuffle(leftovers)
+        selected.extend(leftovers[: max_samples - len(selected)])
+
+    selected = selected[:max_samples]
+    summary = {
+        "mode": mode,
+        "seed": seed,
+        "available": available,
+        "selected": len(selected),
+        "task_balance": task_balance,
+        "use_prompt_tokens": use_prompt_tokens,
+        "selected_buckets": selected_buckets,
+    }
+    return selected, summary
+
+
+def load_calibration_texts(
+    path: Path,
+    max_samples: int,
+    text_field: str,
+) -> Tuple[List[str], dict]:
     if not path.exists():
         raise FileNotFoundError(f"Calibration file not found: {path}")
 
+    records = list(_iter_jsonl(path))
+    selected_records, summary = _select_calibration_records(records, max_samples)
+
     samples: List[str] = []
-    for obj in _iter_jsonl(path):
+    for obj in selected_records:
         text = obj.get(text_field)
         if not text and text_field != "question":
             text = obj.get("question")
         if not text:
             continue
         samples.append(str(text))
-        if len(samples) >= max_samples:
-            break
 
     if not samples:
         raise RuntimeError(
             f"No calibration text found in {path}. Checked field='{text_field}' and fallback='question'."
         )
-    return samples
+    summary = dict(summary)
+    summary["selected"] = len(samples)
+    return samples, summary
 
 
 def _env_truthy(name: str, default: bool) -> bool:
@@ -204,7 +397,7 @@ def run_gptq_quantization(
 
     register_minicpm_sala_gptq_model()
 
-    calibration_texts = load_calibration_texts(
+    calibration_texts, calibration_summary = load_calibration_texts(
         calibration_file,
         max_samples=calibration_samples,
         text_field=calibration_field,
@@ -236,6 +429,7 @@ def run_gptq_quantization(
         "[preprocess] GPTQ start "
         f"bits={bits} group_size={group_size} "
         f"calibration_samples={len(calibration_texts)} batch_size={batch_size} "
+        f"calibration_sampling={json.dumps(calibration_summary, sort_keys=True)} "
         f"trust_remote_code={trust_remote_code} attn_impl={attn_impl} "
         f"layer_aware={layer_aware} include={include_modules} exclude={exclude_modules} "
         f"dynamic_rules={dynamic_rules}"

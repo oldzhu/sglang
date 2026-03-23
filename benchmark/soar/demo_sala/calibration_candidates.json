@@ -1,0 +1,39 @@
+{
+  "candidates": {
+    "semantic_priority_8": {
+      "output_file": "calib_semantic_priority_8.jsonl",
+      "description": "First semantic-priority subset emphasizing mcq and qa.",
+      "indices": [2, 11, 17, 23, 25, 61, 76, 90]
+    },
+    "semantic_priority_8_v2": {
+      "output_file": "calib_semantic_priority_8_v2.jsonl",
+      "description": "Targeted repair set for mcq|len_0_4k and qa|len_4k_32k.",
+      "indices": [1, 2, 4, 8, 61, 63, 66, 76]
+    },
+    "semantic_priority_16": {
+      "output_file": "calib_semantic_priority_16.jsonl",
+      "description": "Larger semantic-priority subset retained for historical comparison.",
+      "indices": [2, 5, 8, 11, 17, 23, 25, 30, 31, 60, 61, 63, 66, 76, 81, 90]
+    },
+    "candidate_baseline_like_8": {
+      "output_file": "calib_candidate_baseline_like_8.jsonl",
+      "description": "Original sequential-8 style mcq anchor set for control experiments.",
+      "indices": [1, 2, 3, 4, 5, 6, 7, 8]
+    },
+    "candidate_mcq_qa_mid_8": {
+      "output_file": "calib_candidate_mcq_qa_mid_8.jsonl",
+      "description": "Balanced repair candidate: short mcq anchors plus three mid-qa and one long-qa anchor.",
+      "indices": [1, 2, 4, 8, 61, 63, 66, 76]
+    },
+    "candidate_mcq_heavy_8": {
+      "output_file": "calib_candidate_mcq_heavy_8.jsonl",
+      "description": "MCQ-heavy candidate to test whether short-bucket stability drives total accuracy more strongly.",
+      "indices": [1, 2, 3, 4, 11, 17, 61, 63]
+    },
+    "candidate_qa_balanced_8": {
+      "output_file": "calib_candidate_qa_balanced_8.jsonl",
+      "description": "QA-balanced candidate with mid and long qa anchors while retaining minimal mcq control.",
+      "indices": [1, 2, 8, 61, 63, 66, 76, 81]
+    }
+  }
+}
