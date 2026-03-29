@@ -39,14 +39,94 @@ from sglang.srt.layers.linear import (
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.layers.rotary_embedding import get_rope
+from sglang.srt.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
+from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import add_prefix
+
+
+_is_cuda = torch.cuda.is_available()
+
+if _is_cuda:
+    from sgl_kernel import fused_qk_norm_rope
+
+
+def _compute_yarn_parameters(config: Any) -> tuple[float, float, float, float]:
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is None:
+        return 1.0, 0, 0, 1.0
+
+    base = getattr(config, "rope_theta", 10000.0)
+    head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+    partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
+    dim = int(head_dim * partial_rotary_factor)
+    factor = rope_scaling.get("factor", 1.0)
+    attention_factor = rope_scaling.get("attention_factor")
+    mscale = rope_scaling.get("mscale")
+    mscale_all_dim = rope_scaling.get("mscale_all_dim")
+
+    if "original_max_position_embeddings" in rope_scaling:
+        original_max_position_embeddings = rope_scaling["original_max_position_embeddings"]
+        factor = config.max_position_embeddings / original_max_position_embeddings
+    else:
+        original_max_position_embeddings = config.max_position_embeddings
+
+    def get_mscale(scale: float, scale_m: float = 1.0) -> float:
+        if scale <= 1:
+            return 1.0
+        return 0.1 * scale_m * math.log(scale) + 1.0
+
+    if attention_factor is None:
+        if mscale and mscale_all_dim:
+            attention_factor = float(
+                get_mscale(factor, mscale) / get_mscale(factor, mscale_all_dim)
+            )
+        else:
+            attention_factor = get_mscale(factor)
+
+    beta_fast = rope_scaling.get("beta_fast") or 32
+    beta_slow = rope_scaling.get("beta_slow") or 1
+
+    def find_correction_dim(
+        num_rotations: float,
+        dim_size: int,
+        rope_base: float,
+        max_position_embeddings: int,
+    ) -> float:
+        return (
+            dim_size * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))
+        ) / (2 * math.log(rope_base))
+
+    def find_correction_range(
+        low_rot: float,
+        high_rot: float,
+        dim_size: int,
+        rope_base: float,
+        max_position_embeddings: int,
+        truncate: bool,
+    ) -> tuple[float, float]:
+        low = find_correction_dim(low_rot, dim_size, rope_base, max_position_embeddings)
+        high = find_correction_dim(high_rot, dim_size, rope_base, max_position_embeddings)
+        if truncate:
+            low = math.floor(low)
+            high = math.ceil(high)
+        return max(low, 0), min(high, dim_size - 1)
+
+    truncate = rope_scaling.get("truncate", True)
+    low, high = find_correction_range(
+        beta_fast,
+        beta_slow,
+        dim,
+        base,
+        original_max_position_embeddings,
+        truncate,
+    )
+    return factor, low, high, attention_factor
 
 
 class MiniCPMMLP(nn.Module):
@@ -305,8 +385,61 @@ class MiniCPMLightningMixer(nn.Module):
                 rope_scaling=rope_scaling,
             )
 
+        self.compatible_with_fused_qk_norm_rope = (
+            _is_cuda
+            and self.qk_norm
+            and self.use_rope
+            and self.head_dim in (64, 128, 256)
+            and not isinstance(getattr(self, "rotary_emb", None), MRotaryEmbedding)
+        )
+        self.use_fused_qk_norm_rope = (
+            self.compatible_with_fused_qk_norm_rope
+            and get_global_server_args().enable_fused_qk_norm_rope
+        )
+
         self.layer_id = layer_id
         self.state_shape = (self.num_kv_heads, self.head_dim, self.head_dim)
+
+    def _apply_qk_norm_rope(self, qkv: torch.Tensor, positions: torch.Tensor):
+        use_fused = self.use_fused_qk_norm_rope and qkv.dtype == torch.bfloat16
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        if not use_fused:
+            if self.qk_norm:
+                q = self.q_norm(q.reshape(-1, self.head_dim))
+                k = self.k_norm(k.reshape(-1, self.head_dim))
+
+            if self.use_rope:
+                q = q.reshape(-1, self.num_heads * self.head_dim)
+                k = k.reshape(-1, self.num_kv_heads * self.head_dim)
+                orig_dtype = q.dtype
+                q, k = q.float(), k.float()
+                q, k = self.rotary_emb(positions, q, k)
+                q, k = q.to(orig_dtype), k.to(orig_dtype)
+
+            return q, k, v
+
+        theta = self.rope_theta
+        positions = positions.view(-1).to(dtype=torch.int32, device=qkv.device).contiguous()
+        factor, low, high, attention_factor = _compute_yarn_parameters(getattr(self, "config", self))
+        fused_qk_norm_rope(
+            qkv,
+            self.num_heads,
+            self.num_kv_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.q_norm.variance_epsilon,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            theta,
+            self.rotary_emb.is_neox_style,
+            positions,
+            factor,
+            low,
+            high,
+            attention_factor,
+        )
+        return qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
     def forward(
         self,
@@ -315,19 +448,7 @@ class MiniCPMLightningMixer(nn.Module):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
-        if self.qk_norm:
-            q = self.q_norm(q.reshape(-1, self.head_dim))
-            k = self.k_norm(k.reshape(-1, self.head_dim))
-
-        if self.use_rope:
-            q = q.reshape(-1, self.num_heads * self.head_dim)
-            k = k.reshape(-1, self.num_kv_heads * self.head_dim)
-            orig_dtype = q.dtype
-            q, k = q.float(), k.float()
-            q, k = self.rotary_emb(positions, q, k)
-            q, k = q.to(orig_dtype), k.to(orig_dtype)
+        q, k, v = self._apply_qk_norm_rope(qkv, positions)
 
         q = q.reshape(-1, self.num_heads, self.head_dim)
         k = k.reshape(-1, self.num_kv_heads, self.head_dim)
@@ -441,6 +562,7 @@ class MiniCPMDecoderLayer(nn.Module):
                 scale=config.lightning_scale,
                 prefix=add_prefix("self_attn", prefix),
             )
+            self.self_attn.config = config
         else:
             raise ValueError(f"Unsupported mixer type: {self.mixer_type}")
         self.mlp = MiniCPMMLP(

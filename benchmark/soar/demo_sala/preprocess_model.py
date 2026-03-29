@@ -17,6 +17,7 @@ import random
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -274,7 +275,8 @@ def load_calibration_texts(
         raise FileNotFoundError(f"Calibration file not found: {path}")
 
     records = list(_iter_jsonl(path))
-    selected_records, summary = _select_calibration_records(records, max_samples)
+    filtered_records, filter_summary = _filter_calibration_records_by_task(records)
+    selected_records, summary = _select_calibration_records(filtered_records, max_samples)
 
     samples: List[str] = []
     for obj in selected_records:
@@ -290,6 +292,7 @@ def load_calibration_texts(
             f"No calibration text found in {path}. Checked field='{text_field}' and fallback='question'."
         )
     summary = dict(summary)
+    summary.update(filter_summary)
     summary["selected"] = len(samples)
     return samples, summary
 
@@ -315,6 +318,44 @@ def _parse_csv_env(name: str, default: Optional[List[str]] = None) -> List[str]:
         seen.add(value)
         values.append(value)
     return values
+
+
+def _normalize_task_name(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
+def _filter_calibration_records_by_task(records: List[dict]) -> Tuple[List[dict], dict]:
+    include_tasks = _parse_csv_env("SOAR_GPTQ_CALIBRATION_TASK_INCLUDE")
+    normalized_include = [_normalize_task_name(task) for task in include_tasks if task.strip()]
+
+    if not normalized_include:
+        return records, {
+            "task_include": [],
+            "records_before_task_filter": len(records),
+            "records_after_task_filter": len(records),
+            "task_filter_applied": False,
+        }
+
+    include_set = set(normalized_include)
+    filtered = [
+        record
+        for record in records
+        if _normalize_task_name(record.get("task")) in include_set
+    ]
+    if not filtered:
+        raise RuntimeError(
+            "Calibration task filter removed all records. "
+            f"SOAR_GPTQ_CALIBRATION_TASK_INCLUDE={normalized_include}"
+        )
+
+    return filtered, {
+        "task_include": normalized_include,
+        "records_before_task_filter": len(records),
+        "records_after_task_filter": len(filtered),
+        "task_filter_applied": True,
+    }
 
 
 def _call_with_supported_kwargs(
@@ -380,6 +421,314 @@ def _is_module_mismatch_error(exc: Exception) -> bool:
     return any(pattern in text for pattern in patterns)
 
 
+def _safe_symlink_or_copy(src: Path, dst: Path) -> None:
+    try:
+        os.symlink(src, dst, target_is_directory=src.is_dir())
+    except OSError:
+        if src.is_dir():
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+
+
+def _rope_debug_snapshot(config: dict) -> dict:
+    return {
+        "rope_scaling_present": "rope_scaling" in config,
+        "rope_type_present": "rope_type" in config,
+        "rope_scaling": config.get("rope_scaling"),
+        "rope_type": config.get("rope_type"),
+    }
+
+
+def _format_rope_debug(prefix: str, snapshot: dict) -> str:
+    return (
+        f"[preprocess][rope-debug] {prefix} "
+        f"rope_scaling_present={snapshot['rope_scaling_present']} "
+        f"rope_type_present={snapshot['rope_type_present']} "
+        f"rope_scaling={json.dumps(snapshot['rope_scaling'], ensure_ascii=False, sort_keys=True)} "
+        f"rope_type={json.dumps(snapshot['rope_type'], ensure_ascii=False)}"
+    )
+
+
+def _config_attr_snapshot(config: Any) -> dict:
+    return {
+        "model_type": getattr(config, "model_type", None),
+        "rope_scaling": getattr(config, "rope_scaling", None),
+        "rope_parameters": getattr(config, "rope_parameters", None),
+        "rope_type": getattr(config, "rope_type", None),
+        "rope_theta": getattr(config, "rope_theta", None),
+        "max_position_embeddings": getattr(config, "max_position_embeddings", None),
+    }
+
+
+def _format_config_attr_debug(prefix: str, snapshot: dict) -> str:
+    return (
+        f"[preprocess][rope-debug] {prefix} "
+        f"model_type={json.dumps(snapshot['model_type'], ensure_ascii=False)} "
+        f"rope_scaling={json.dumps(snapshot['rope_scaling'], ensure_ascii=False, sort_keys=True)} "
+        f"rope_parameters={json.dumps(snapshot['rope_parameters'], ensure_ascii=False, sort_keys=True)} "
+        f"rope_type={json.dumps(snapshot['rope_type'], ensure_ascii=False)} "
+        f"rope_theta={json.dumps(snapshot['rope_theta'], ensure_ascii=False)} "
+        f"max_position_embeddings={json.dumps(snapshot['max_position_embeddings'], ensure_ascii=False)}"
+    )
+
+
+def _clear_minicpm_default_rope_state(config: Any) -> List[str]:
+    changes: List[str] = []
+    if getattr(config, "model_type", None) != "minicpm_sala":
+        return changes
+
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if isinstance(rope_scaling, dict):
+        scaling_type = rope_scaling.get("rope_type", rope_scaling.get("type"))
+        if scaling_type == "default":
+            config.rope_scaling = None
+            changes.append("cleared in-memory rope_scaling default marker for MiniCPM-SALA")
+
+    rope_parameters = getattr(config, "rope_parameters", None)
+    if isinstance(rope_parameters, dict) and rope_parameters.get("rope_type") == "default":
+        config.rope_parameters = None
+        changes.append("cleared in-memory rope_parameters default marker for MiniCPM-SALA")
+
+    if getattr(config, "rope_type", None) == "default":
+        config.rope_type = None
+        changes.append("cleared in-memory top-level rope_type default marker for MiniCPM-SALA")
+
+    return changes
+
+
+def _print_dependency_versions(prefix: str) -> None:
+    import gptqmodel
+    import transformers
+
+    print(
+        f"[preprocess] {prefix} "
+        f"python={json.dumps(os.sys.version.split()[0])} "
+        f"gptqmodel={json.dumps(getattr(gptqmodel, '__version__', 'unknown'))} "
+        f"transformers={json.dumps(getattr(transformers, '__version__', 'unknown'))}"
+    )
+
+
+def _log_minicpm_in_memory_config(
+    config: Any,
+    pre_label: str,
+    post_label: str,
+    middle_label: Optional[str] = None,
+    middle_snapshot: Optional[dict] = None,
+) -> List[str]:
+    pre_snapshot = _config_attr_snapshot(config)
+    changes = _clear_minicpm_default_rope_state(config)
+    patched_snapshot = _config_attr_snapshot(config)
+
+    if getattr(config, "model_type", None) != "minicpm_sala":
+        return changes
+
+    debug_in_memory_config = _env_truthy("SOAR_GPTQ_DEBUG_IN_MEMORY_CONFIG", default=True)
+    if not (debug_in_memory_config or changes):
+        return changes
+
+    print(_format_config_attr_debug(pre_label, pre_snapshot))
+    if middle_label is not None and middle_snapshot is not None:
+        print(_format_config_attr_debug(middle_label, middle_snapshot))
+    if changes:
+        print(
+            "[preprocess][rope-debug] in_memory_patch "
+            f"changes={json.dumps(changes, ensure_ascii=False)}"
+        )
+    print(_format_config_attr_debug(post_label, patched_snapshot))
+    return changes
+
+
+def _install_gptqmodel_minicpm_rope_patch() -> None:
+    import transformers
+    from gptqmodel.utils import hf as gptq_hf
+    from transformers import modeling_utils as modeling_utils
+
+    _print_dependency_versions("GPTQ dependency versions")
+
+    original_normalize = getattr(gptq_hf, "normalize_hf_config_compat", None)
+    original_build_shell_model = getattr(gptq_hf, "build_shell_model", None)
+    original_from_pretrained = modeling_utils.PreTrainedModel.from_pretrained.__func__
+    original_from_config = modeling_utils.PreTrainedModel._from_config.__func__
+    installed_hooks: List[str] = []
+
+    if original_normalize is not None:
+        if not getattr(original_normalize, "_soar_minicpm_patch_installed", False):
+            def wrapped_normalize_hf_config_compat(config: Any, *args: Any, **kwargs: Any) -> None:
+                original_normalize(config, *args, **kwargs)
+                original_post_snapshot = _config_attr_snapshot(config)
+                _log_minicpm_in_memory_config(
+                    config,
+                    pre_label="in_memory_config pre_normalize",
+                    middle_label="in_memory_config post_normalize_pre_patch",
+                    middle_snapshot=original_post_snapshot,
+                    post_label="in_memory_config post_patch",
+                )
+                return None
+
+            wrapped_normalize_hf_config_compat._soar_minicpm_patch_installed = True
+            gptq_hf.normalize_hf_config_compat = wrapped_normalize_hf_config_compat
+            installed_hooks.append("normalize_hf_config_compat")
+
+    if original_build_shell_model is not None:
+        if not getattr(original_build_shell_model, "_soar_minicpm_patch_installed", False):
+            def wrapped_build_shell_model(*args: Any, **kwargs: Any) -> Any:
+                config = kwargs.get("config")
+                if config is None and len(args) >= 2:
+                    config = args[1]
+                if config is not None:
+                    _log_minicpm_in_memory_config(
+                        config,
+                        pre_label="in_memory_config build_shell_model_entry_pre_patch",
+                        post_label="in_memory_config build_shell_model_entry_post_patch",
+                    )
+                return original_build_shell_model(*args, **kwargs)
+
+            wrapped_build_shell_model._soar_minicpm_patch_installed = True
+            gptq_hf.build_shell_model = wrapped_build_shell_model
+            installed_hooks.append("build_shell_model")
+
+    if not getattr(original_from_pretrained, "_soar_minicpm_patch_installed", False):
+        def wrapped_from_pretrained(cls: Any, pretrained_model_name_or_path: Any, *model_args: Any, **kwargs: Any) -> Any:
+            config = kwargs.get("config")
+            if getattr(config, "model_type", None) == "minicpm_sala":
+                _print_dependency_versions("GPTQ dependency versions pre_transformers_from_pretrained")
+                _log_minicpm_in_memory_config(
+                    config,
+                    pre_label="transformers_from_pretrained_entry_pre_patch",
+                    post_label="transformers_from_pretrained_entry_post_patch",
+                )
+            return original_from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs)
+
+        wrapped_from_pretrained._soar_minicpm_patch_installed = True
+        modeling_utils.PreTrainedModel.from_pretrained = classmethod(wrapped_from_pretrained)
+        installed_hooks.append("transformers.from_pretrained")
+
+    if not getattr(original_from_config, "_soar_minicpm_patch_installed", False):
+        def wrapped_from_config(cls: Any, config: Any, **kwargs: Any) -> Any:
+            if getattr(config, "model_type", None) == "minicpm_sala":
+                _print_dependency_versions("GPTQ dependency versions pre_transformers_from_config")
+                _log_minicpm_in_memory_config(
+                    config,
+                    pre_label="transformers_from_config_entry_pre_patch",
+                    post_label="transformers_from_config_entry_post_patch",
+                )
+            return original_from_config(cls, config, **kwargs)
+
+        wrapped_from_config._soar_minicpm_patch_installed = True
+        modeling_utils.PreTrainedModel._from_config = classmethod(wrapped_from_config)
+        installed_hooks.append("transformers._from_config")
+
+    if installed_hooks:
+        print(
+            "[preprocess] Installed MiniCPM-SALA load compatibility hooks "
+            f"hooks={json.dumps(installed_hooks)}"
+        )
+        return
+
+    print(
+        "[preprocess] MiniCPM-SALA load compatibility hooks already installed"
+    )
+
+
+def _sanitize_model_config_for_gptq(config: dict) -> Tuple[dict, List[str], dict, dict]:
+    sanitized = dict(config)
+    changes: List[str] = []
+    raw_snapshot = _rope_debug_snapshot(config)
+    force_null_rope_scaling = _env_truthy(
+        "SOAR_GPTQ_FORCE_NULL_ROPE_SCALING", default=False
+    )
+
+    rope_scaling = sanitized.get("rope_scaling")
+    has_default_rope_marker = isinstance(rope_scaling, dict) and (
+        rope_scaling.get("type") == "default"
+        or rope_scaling.get("rope_type") == "default"
+    )
+    if has_default_rope_marker:
+        if force_null_rope_scaling:
+            sanitized["rope_scaling"] = None
+            changes.append(
+                "set rope_scaling=null because default rope scaling markers are unsupported by current MiniCPM-SALA GPTQ shell load path"
+            )
+        else:
+            sanitized.pop("rope_scaling", None)
+            changes.append(
+                "removed rope_scaling because default rope scaling markers are unsupported by current MiniCPM-SALA GPTQ shell load path"
+            )
+
+    if force_null_rope_scaling and not has_default_rope_marker:
+        sanitized["rope_scaling"] = None
+        changes.append(
+            "set rope_scaling=null due to SOAR_GPTQ_FORCE_NULL_ROPE_SCALING workaround"
+        )
+
+    if "rope_type" in sanitized:
+        sanitized.pop("rope_type", None)
+        changes.append("removed top-level rope_type from GPTQ temp config")
+
+    sanitized_snapshot = _rope_debug_snapshot(sanitized)
+    return sanitized, changes, raw_snapshot, sanitized_snapshot
+
+
+def _prepare_gptq_load_source(
+    src: Path,
+) -> Tuple[Path, Optional[tempfile.TemporaryDirectory[str]], dict]:
+    config_path = src / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    sanitized_config, changes, raw_snapshot, sanitized_snapshot = _sanitize_model_config_for_gptq(config)
+    debug_info = {
+        "raw": raw_snapshot,
+        "sanitized": sanitized_snapshot,
+        "changes": changes,
+        "used_temp_source": bool(changes),
+        "load_src": str(src),
+    }
+
+    print(_format_rope_debug("raw_config", raw_snapshot))
+    if not changes:
+        print(_format_rope_debug("sanitized_config source=raw", sanitized_snapshot))
+        return src, None, debug_info
+
+    temp_dir = tempfile.TemporaryDirectory(prefix="soar_gptq_model_")
+    temp_root = Path(temp_dir.name)
+    debug_info["load_src"] = str(temp_root)
+
+    for entry in sorted(src.iterdir()):
+        if entry.name.startswith("."):
+            continue
+        target = temp_root / entry.name
+        if entry.name == "config.json":
+            target.write_text(
+                json.dumps(sanitized_config, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            continue
+        _safe_symlink_or_copy(entry, target)
+
+    print(
+        "[preprocess] GPTQ load-source config sanitization "
+        f"source={src} temp_source={temp_root} changes={changes}"
+    )
+    print(_format_rope_debug(f"sanitized_config source={temp_root}", sanitized_snapshot))
+    return temp_root, temp_dir, debug_info
+
+
+def _restore_gptq_source_metadata(model: Any, src: Path) -> None:
+    src_str = str(src)
+
+    if hasattr(model, "model_local_path"):
+        try:
+            model.model_local_path = src_str
+        except Exception:
+            pass
+
+    if hasattr(model, "model_name_or_path"):
+        try:
+            model.model_name_or_path = src_str
+        except Exception:
+            pass
+
+
 def run_gptq_quantization(
     src: Path,
     dst: Path,
@@ -396,6 +745,7 @@ def run_gptq_quantization(
     from gptqmodel_minicpm_sala import register_minicpm_sala_gptq_model
 
     register_minicpm_sala_gptq_model()
+    _install_gptqmodel_minicpm_rope_patch()
 
     calibration_texts, calibration_summary = load_calibration_texts(
         calibration_file,
@@ -436,85 +786,107 @@ def run_gptq_quantization(
     )
     print("[preprocess] GPTQ custom model support enabled for model_type=minicpm_sala")
 
+    load_src, load_src_tmpdir, load_debug_info = _prepare_gptq_load_source(src)
+
     load_kwargs = {
         "trust_remote_code": trust_remote_code,
         "attn_implementation": attn_impl,
     }
-    model = _call_with_supported_kwargs(
-        GPTQModel.load,
-        [str(src), quant_config],
-        load_kwargs,
-        optional_keys=["attn_implementation"],
-    )
-    if layer_aware:
-        try:
-            print(
-                "[preprocess] GPTQ resolved modules "
-                f"simple_layer_modules={model.simple_layer_modules(model.model.config, model.quantize_config)}"
-            )
-        except Exception as debug_exc:
-            print(f"[preprocess] GPTQ module debug unavailable: {debug_exc}")
-
     try:
-        _call_with_supported_kwargs(
-            model.quantize,
-            [calibration_texts],
-            {"batch_size": batch_size},
-            optional_keys=["batch_size"],
-        )
-    except Exception as exc:
-        if not (layer_aware and _is_module_mismatch_error(exc)):
-            raise
-
-        retry_include = [
-            "self_attn.q_proj",
-            "self_attn.k_proj",
-            "self_attn.v_proj",
-            "self_attn.o_proj",
-            "mlp.gate_proj",
-            "mlp.up_proj",
-            "mlp.down_proj",
-        ]
-        retry_exclude = ["self_attn.o_gate", "self_attn.z_proj"]
-        print(
-            "[preprocess] GPTQ retry after module mismatch "
-            f"error={exc} retry_include={retry_include} retry_exclude={retry_exclude}"
-        )
-
-        retry_dynamic = _build_dynamic_rules(retry_include, retry_exclude)
-        retry_config = QuantizeConfig(
-            bits=bits,
-            group_size=group_size,
-            dynamic=retry_dynamic,
-        )
-        print(
-            "[preprocess] GPTQ retry dynamic "
-            f"dynamic_rules={retry_dynamic}"
-        )
-
-        retry_model = _call_with_supported_kwargs(
-            GPTQModel.load,
-            [str(src), retry_config],
-            load_kwargs,
-            optional_keys=["attn_implementation"],
-        )
         try:
-            print(
-                "[preprocess] GPTQ retry resolved modules "
-                f"simple_layer_modules={retry_model.simple_layer_modules(retry_model.model.config, retry_model.quantize_config)}"
+            model = _call_with_supported_kwargs(
+                GPTQModel.load,
+                [str(load_src), quant_config],
+                load_kwargs,
+                optional_keys=["attn_implementation"],
             )
-        except Exception as debug_exc:
-            print(f"[preprocess] GPTQ retry module debug unavailable: {debug_exc}")
-        _call_with_supported_kwargs(
-            retry_model.quantize,
-            [calibration_texts],
-            {"batch_size": batch_size},
-            optional_keys=["batch_size"],
-        )
-        model = retry_model
+        except Exception as exc:
+            print(
+                "[preprocess][rope-debug] load_failed "
+                f"load_src={load_debug_info['load_src']} "
+                f"used_temp_source={load_debug_info['used_temp_source']} "
+                f"changes={json.dumps(load_debug_info['changes'], ensure_ascii=False)} "
+                f"raw_rope_scaling={json.dumps(load_debug_info['raw']['rope_scaling'], ensure_ascii=False, sort_keys=True)} "
+                f"raw_rope_type={json.dumps(load_debug_info['raw']['rope_type'], ensure_ascii=False)} "
+                f"sanitized_rope_scaling={json.dumps(load_debug_info['sanitized']['rope_scaling'], ensure_ascii=False, sort_keys=True)} "
+                f"sanitized_rope_type={json.dumps(load_debug_info['sanitized']['rope_type'], ensure_ascii=False)} "
+                f"exc_type={type(exc).__name__} exc={exc}"
+            )
+            raise
+        _restore_gptq_source_metadata(model, src)
+        if layer_aware:
+            try:
+                print(
+                    "[preprocess] GPTQ resolved modules "
+                    f"simple_layer_modules={model.simple_layer_modules(model.model.config, model.quantize_config)}"
+                )
+            except Exception as debug_exc:
+                print(f"[preprocess] GPTQ module debug unavailable: {debug_exc}")
 
-    dst.mkdir(parents=True, exist_ok=True)
-    model.save(str(dst))
+        try:
+            _call_with_supported_kwargs(
+                model.quantize,
+                [calibration_texts],
+                {"batch_size": batch_size},
+                optional_keys=["batch_size"],
+            )
+        except Exception as exc:
+            if not (layer_aware and _is_module_mismatch_error(exc)):
+                raise
+
+            retry_include = [
+                "self_attn.q_proj",
+                "self_attn.k_proj",
+                "self_attn.v_proj",
+                "self_attn.o_proj",
+                "mlp.gate_proj",
+                "mlp.up_proj",
+                "mlp.down_proj",
+            ]
+            retry_exclude = ["self_attn.o_gate", "self_attn.z_proj"]
+            print(
+                "[preprocess] GPTQ retry after module mismatch "
+                f"error={exc} retry_include={retry_include} retry_exclude={retry_exclude}"
+            )
+
+            retry_dynamic = _build_dynamic_rules(retry_include, retry_exclude)
+            retry_config = QuantizeConfig(
+                bits=bits,
+                group_size=group_size,
+                dynamic=retry_dynamic,
+            )
+            print(
+                "[preprocess] GPTQ retry dynamic "
+                f"dynamic_rules={retry_dynamic}"
+            )
+
+            retry_model = _call_with_supported_kwargs(
+                GPTQModel.load,
+                [str(load_src), retry_config],
+                load_kwargs,
+                optional_keys=["attn_implementation"],
+            )
+            _restore_gptq_source_metadata(retry_model, src)
+            try:
+                print(
+                    "[preprocess] GPTQ retry resolved modules "
+                    f"simple_layer_modules={retry_model.simple_layer_modules(retry_model.model.config, retry_model.quantize_config)}"
+                )
+            except Exception as debug_exc:
+                print(f"[preprocess] GPTQ retry module debug unavailable: {debug_exc}")
+            _call_with_supported_kwargs(
+                retry_model.quantize,
+                [calibration_texts],
+                {"batch_size": batch_size},
+                optional_keys=["batch_size"],
+            )
+            model = retry_model
+
+        dst.mkdir(parents=True, exist_ok=True)
+        model.save(str(dst))
+    finally:
+        if load_src_tmpdir is not None:
+            load_src_tmpdir.cleanup()
 
     if not (dst / "quantize_config.json").exists():
         raise RuntimeError(

@@ -47,7 +47,7 @@ from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.spec_info import SpecInput
-from sglang.srt.utils import is_cuda, is_npu
+from sglang.srt.utils import get_bool_env_var, get_int_env_var, is_cuda, is_npu
 
 
 if is_cuda():
@@ -1456,6 +1456,9 @@ class SimpleGLAAttnBackend(MambaAttnBackendBase):
         assert minicpm_config is not None, "minicpm_hybrid_config is required for SimpleGLA backend"
 
         self.conv_states_shape = None
+        self.force_dense_minicpm = getattr(
+            model_runner.server_args, "force_dense_minicpm", False
+        )
 
         tp_size = get_tensor_model_parallel_world_size()
         total_num_heads = minicpm_config.lightning_nkv or 16
@@ -1477,6 +1480,19 @@ class SimpleGLAAttnBackend(MambaAttnBackendBase):
             self.scale = head_dim ** (-1.0)
         else:
             self.scale = 1.0
+
+        default_recurrent_threshold = 128 if self.force_dense_minicpm else 64
+        self.recurrent_threshold = max(
+            1,
+            get_int_env_var(
+                "SGLANG_MINICPM_LIGHTNING_RECURRENT_THRESHOLD",
+                default_recurrent_threshold,
+            ),
+        )
+        self.fast_state_io = get_bool_env_var(
+            "SGLANG_MINICPM_LIGHTNING_FAST_STATE_IO", "true"
+        )
+        self.layer_cache_indices = dict(self.req_to_token_pool.mamba_map)
 
         if not SIMPLE_GLA_AVAILABLE:
             raise ImportError(
@@ -1508,6 +1524,69 @@ class SimpleGLAAttnBackend(MambaAttnBackendBase):
             return self.req_to_token_pool.get_mamba_indices(
                 forward_batch.req_pool_indices
             )
+
+    def _get_layer_cache(self, layer_id: int):
+        cache_idx = self.layer_cache_indices.get(layer_id)
+        if cache_idx is None:
+            raise RuntimeError(
+                f"SimpleGLAAttnBackend layer {layer_id} is missing from mamba_map. "
+                f"This indicates a misconfiguration - lightning layers must be registered in cache_params.layers. "
+                f"Available layers: {list(self.layer_cache_indices.keys())}"
+            )
+        return self.req_to_token_pool.mamba_pool.mamba2_layer_cache(cache_idx)
+
+    def _has_prefix_state(self, forward_batch: ForwardBatch) -> bool:
+        prefix_lens = forward_batch.extend_prefix_lens
+        if prefix_lens is None:
+            return False
+        if torch.is_tensor(prefix_lens):
+            return bool(torch.any(prefix_lens > 0).item())
+        return bool(prefix_lens > 0)
+
+    def _can_use_fast_state_io(
+        self, layer_cache, mamba_indices: torch.Tensor
+    ) -> bool:
+        if not self.fast_state_io or mamba_indices.numel() == 0:
+            return False
+        if mamba_indices.dtype not in (torch.int32, torch.int64):
+            return False
+        if mamba_indices.is_cuda and torch.cuda.is_current_stream_capturing():
+            return False
+
+        temporal_size = layer_cache.temporal.shape[0]
+        min_index = int(torch.min(mamba_indices).item())
+        max_index = int(torch.max(mamba_indices).item())
+        return min_index >= 0 and max_index < temporal_size
+
+    def _load_initial_state(self, layer_cache, mamba_indices: torch.Tensor):
+        if mamba_indices.numel() == 0:
+            return None
+        if self._can_use_fast_state_io(layer_cache, mamba_indices):
+            gather_indices = mamba_indices.to(dtype=torch.int64)
+            return torch.index_select(layer_cache.temporal, 0, gather_indices)
+        return layer_cache.temporal[mamba_indices, :].contiguous()
+
+    def _store_final_state(
+        self,
+        layer_cache,
+        mamba_indices: torch.Tensor,
+        final_state: torch.Tensor,
+    ) -> None:
+        if mamba_indices.numel() == 0:
+            return
+        if self._can_use_fast_state_io(layer_cache, mamba_indices):
+            scatter_indices = mamba_indices.to(dtype=torch.int64)
+            layer_cache.temporal.index_copy_(0, scatter_indices, final_state)
+            return
+        layer_cache.temporal[mamba_indices, :] = final_state
+
+    def _select_mode(self, forward_batch: ForwardBatch) -> str:
+        if forward_batch.forward_mode.is_decode():
+            return "fused_recurrent"
+        seq_len = int(torch.max(forward_batch.extend_seq_lens).item())
+        if seq_len < self.recurrent_threshold:
+            return "fused_recurrent"
+        return "chunk"
 
     def _init_track_conv_indices(
         self, query_start_loc: torch.Tensor, forward_batch: ForwardBatch
@@ -1559,41 +1638,24 @@ class SimpleGLAAttnBackend(MambaAttnBackendBase):
         layer_id: int,
         output_attentions: bool = False,
     ) -> torch.Tensor:
-
         num_heads = q.shape[2]
         head_dim = q.shape[3]
-        if forward_batch.forward_mode.is_decode():
-            seq_len = 1
-        else:
-            seq_len = torch.max(forward_batch.extend_seq_lens)
-
         mamba_indices = self._get_mamba_indices(forward_batch)
+        layer_cache = self._get_layer_cache(layer_id)
         initial_state = None
-        has_initial_state = forward_batch.extend_prefix_lens is not None and forward_batch.extend_prefix_lens > 0
-        if forward_batch.forward_mode.is_decode() or has_initial_state.any():
-            cache_idx = self.req_to_token_pool.mamba_map.get(layer_id)
-            if cache_idx is not None:
-                layer_cache = self.req_to_token_pool.mamba_pool.mamba2_layer_cache(cache_idx)
-                initial_state = layer_cache.temporal[mamba_indices, :].contiguous()
-            else:
-                raise RuntimeError(
-                    f"SimpleGLAAttnBackend layer {layer_id} is missing from mamba_map. "
-                    f"This indicates a misconfiguration - lightning layers must be registered in cache_params.layers. "
-                    f"Available layers: {list(self.req_to_token_pool.mamba_map.keys())}"
-                )
+        if forward_batch.forward_mode.is_decode() or self._has_prefix_state(
+            forward_batch
+        ):
+            initial_state = self._load_initial_state(layer_cache, mamba_indices)
 
-        scale = self.scale
-
-        g_gamma = self.g_gamma
-
-        mode = "fused_recurrent" if seq_len < 64 else "chunk"
+        mode = self._select_mode(forward_batch)
         if forward_batch.forward_mode.is_decode() or mode == "fused_recurrent":
             o, final_state = fused_recurrent_simple_gla(
                 q=q,
                 k=k,
                 v=v,
-                g_gamma=g_gamma,
-                scale=scale,
+                g_gamma=self.g_gamma,
+                scale=self.scale,
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=self.forward_metadata.query_start_loc,
@@ -1603,26 +1665,15 @@ class SimpleGLAAttnBackend(MambaAttnBackendBase):
                 q=q,
                 k=k,
                 v=v,
-                g_gamma=g_gamma,
+                g_gamma=self.g_gamma,
                 initial_state=initial_state,
                 output_final_state=True,
-                scale=scale,
+                scale=self.scale,
                 cu_seqlens=self.forward_metadata.query_start_loc,
             )
 
         if final_state is not None:
-            mamba_indices = self._get_mamba_indices(forward_batch)
-            cache_idx = self.req_to_token_pool.mamba_map.get(layer_id)
-
-            if cache_idx is not None:
-                layer_cache = self.req_to_token_pool.mamba_pool.mamba2_layer_cache(cache_idx)
-                layer_cache.temporal[mamba_indices, :] = final_state
-            else:
-                raise RuntimeError(
-                    f"SimpleGLAAttnBackend layer {layer_id} is missing from mamba_map. "
-                    f"Cannot save state - layer must be registered in cache_params.layers. "
-                    f"Available layers: {list(self.req_to_token_pool.mamba_map.keys())}"
-                )
+            self._store_final_state(layer_cache, mamba_indices, final_state)
 
         o = o.reshape(-1, num_heads * head_dim)
 
