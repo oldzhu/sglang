@@ -47,7 +47,7 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.server_args import get_global_server_args
-from sglang.srt.utils import add_prefix
+from sglang.srt.utils import add_prefix, get_bool_env_var
 
 
 _is_cuda = torch.cuda.is_available()
@@ -396,6 +396,9 @@ class MiniCPMLightningMixer(nn.Module):
             self.compatible_with_fused_qk_norm_rope
             and get_global_server_args().enable_fused_qk_norm_rope
         )
+        self.use_fast_output_gate = get_bool_env_var(
+            "SGLANG_MINICPM_LIGHTNING_FAST_OUTPUT_GATE", "true"
+        )
 
         self.layer_id = layer_id
         self.state_shape = (self.num_kv_heads, self.head_dim, self.head_dim)
@@ -440,6 +443,30 @@ class MiniCPMLightningMixer(nn.Module):
             attention_factor,
         )
         return qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+    def _apply_output_epilogue(
+        self, attn_output: torch.Tensor, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
+        if self.use_output_norm:
+            attn_output = self.o_norm(attn_output)
+
+        if self.use_output_gate:
+            z, _ = self.z_proj(hidden_states)
+            if (
+                self.use_fast_output_gate
+                and not torch.is_grad_enabled()
+                and z.dtype == attn_output.dtype
+            ):
+                z.sigmoid_()
+                attn_output.mul_(z)
+            else:
+                gate = torch.sigmoid(z)
+                if gate.dtype != attn_output.dtype:
+                    gate = gate.to(dtype=attn_output.dtype)
+                attn_output = attn_output * gate
+
+        output, _ = self.o_proj(attn_output)
+        return output
 
     def forward(
         self,
@@ -487,16 +514,7 @@ class MiniCPMLightningMixer(nn.Module):
         )
 
         o = o.reshape(-1, self.num_heads * self.head_dim)
-
-        if self.use_output_norm:
-            o = self.o_norm(o)
-
-        if self.use_output_gate:
-            z, _ = self.z_proj(hidden_states)
-            o = o * F.sigmoid(z)
-
-        y, _ = self.o_proj(o)
-        return y
+        return self._apply_output_epilogue(o, hidden_states)
 
 
 class MiniCPMDecoderLayer(nn.Module):
