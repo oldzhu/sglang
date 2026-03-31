@@ -121,3 +121,19 @@ export SOAR_GPTQ_EXCLUDE_MODULES=self_attn.o_gate,self_attn.z_proj
 1. 先重点看 `qa` 和 `cwe` 是否改善，因为这两个 bucket 看起来最像是 K 精度敏感型问题。
 2. 如果有效但还不够，下一轮 accuracy feature 再考虑同时保留 Q 和 K。
 3. 如果无效，就应从 calibration / projection rollback 这条线跳出，转向其他 accuracy 假设，而不是继续增加校准样本。
+
+## 测试后的状态更新
+
+这个 feature 目前已经在当前代码路径中临时回滚。
+
+原因如下：
+
+1. 量化预处理可以完成，但后续 SGLang 服务加载失败，报错为 `KeyError: 'model.layers.0.self_attn.qkv_proj.weight'`。
+2. MiniCPM 在 `minicpm.py` 的运行时加载逻辑中，会把 checkpoint 里的 `q_proj`、`k_proj`、`v_proj` 统一重写到合并后的运行时参数 `qkv_proj`。
+3. 只保留 `k_proj` 会在这个合并 QKV 边界内部形成混合格式，导致运行时 loader 无法为生成出来的 checkpoint 布局找到兼容的普通 `qkv_proj.weight` 目标。
+
+临时回滚的原因：
+
+- 当前优先级是保证量化路径可加载，并把精度变量控制清楚。
+- 因此暂时不继续推进 projection-preservation 实验，而是回到已知可加载的 GPTQ scope，并把 calibration 覆盖提高到 `qa`、`mcq`、`cwe` 三个任务各 30 条、总计 90 条样本。
+- 保留本文件是为了记录这个假设、实际观察到的 loader 失败，以及为什么当前只是暂停该 feature，而不是把它视作有效 baseline。

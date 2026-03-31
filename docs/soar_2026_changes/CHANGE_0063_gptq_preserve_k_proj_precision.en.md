@@ -121,3 +121,19 @@ If preserving `k_proj` does not improve correctness enough, or the speed cost is
 1. Measure whether `qa` and `cwe` improve first, because they are the most K-sensitive-looking buckets.
 2. If this helps but is not enough, the next accuracy feature should consider preserving both Q and K as a separate experiment.
 3. If it does not help, move away from calibration and projection rollback toward a different accuracy hypothesis rather than continuing to increase calibration samples.
+
+## Status Update After Testing
+
+This feature is temporarily rolled back in the active code path.
+
+Why:
+
+1. The quantized model finished preprocessing, but SGLang serving later failed with `KeyError: 'model.layers.0.self_attn.qkv_proj.weight'`.
+2. MiniCPM runtime loading in `minicpm.py` rewrites checkpoint names `q_proj`, `k_proj`, and `v_proj` into the merged runtime parameter `qkv_proj`.
+3. Preserving only `k_proj` created a mixed-format boundary inside that merged QKV structure, so the runtime loader could not find a compatible plain `qkv_proj.weight` target for the checkpoint layout that was produced.
+
+Temporary rollback rationale:
+
+- The current priority is to keep the quantization path loadable and isolate accuracy variables.
+- Instead of continuing on projection-preservation experiments immediately, the active test direction moves back to the known loadable GPTQ scope and increases calibration coverage to use all 30 records from each of `qa`, `mcq`, and `cwe` for a total of 90 calibration samples.
+- This document is kept as a record of the hypothesis, the observed loader failure, and the reason the feature is paused rather than treated as a valid baseline.
