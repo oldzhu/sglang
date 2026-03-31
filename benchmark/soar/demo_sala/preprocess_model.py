@@ -755,14 +755,13 @@ def run_gptq_quantization(
 
     default_include = [
         "self_attn.q_proj",
-        "self_attn.k_proj",
         "self_attn.v_proj",
         "self_attn.o_proj",
         "mlp.gate_proj",
         "mlp.up_proj",
         "mlp.down_proj",
     ]
-    default_exclude = ["self_attn.o_gate", "self_attn.z_proj"]
+    default_exclude = ["self_attn.k_proj", "self_attn.o_gate", "self_attn.z_proj"]
 
     layer_aware = _env_truthy("SOAR_GPTQ_LAYER_AWARE", default=True)
     include_modules = _parse_csv_env("SOAR_GPTQ_INCLUDE_MODULES", default=default_include)
@@ -836,14 +835,13 @@ def run_gptq_quantization(
 
             retry_include = [
                 "self_attn.q_proj",
-                "self_attn.k_proj",
                 "self_attn.v_proj",
                 "self_attn.o_proj",
                 "mlp.gate_proj",
                 "mlp.up_proj",
                 "mlp.down_proj",
             ]
-            retry_exclude = ["self_attn.o_gate", "self_attn.z_proj"]
+            retry_exclude = ["self_attn.k_proj", "self_attn.o_gate", "self_attn.z_proj"]
             print(
                 "[preprocess] GPTQ retry after module mismatch "
                 f"error={exc} retry_include={retry_include} retry_exclude={retry_exclude}"
