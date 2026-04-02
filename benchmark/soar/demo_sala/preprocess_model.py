@@ -400,12 +400,34 @@ def _include_value_for_attr(attr_name: str, modules: List[str]) -> Any:
 
 
 def _build_dynamic_rules(include_modules: List[str], exclude_modules: List[str]) -> dict:
-    del include_modules
     dynamic = {}
 
     for module in exclude_modules:
         escaped = re.escape(module)
         dynamic[rf"-:.*{escaped}.*"] = {}
+
+    mixed_precision_preset = (
+        os.environ.get("SOAR_GPTQ_MIXED_PRECISION_PRESET", "o_proj_w8").strip().lower()
+    )
+    if mixed_precision_preset in {"", "0", "off", "none"}:
+        return dynamic
+
+    if mixed_precision_preset != "o_proj_w8":
+        raise ValueError(
+            "Unsupported SOAR_GPTQ_MIXED_PRECISION_PRESET: "
+            f"{mixed_precision_preset}. Supported values: o_proj_w8, off"
+        )
+
+    target_module = "self_attn.o_proj"
+    if target_module in exclude_modules:
+        return dynamic
+    if include_modules and target_module not in include_modules:
+        return dynamic
+
+    dynamic[rf"+:.*{re.escape(target_module)}.*"] = {
+        "bits": _parse_int_env("SOAR_GPTQ_O_PROJ_BITS", 8),
+        "group_size": _parse_int_env("SOAR_GPTQ_O_PROJ_GROUP_SIZE", 128),
+    }
 
     return dynamic
 
