@@ -448,20 +448,32 @@ def _build_dynamic_rules(
     if mixed_precision_preset in {"", "0", "off", "none"}:
         return dynamic
 
-    if mixed_precision_preset == "o_proj_w8":
+    enable_o_proj_w8 = mixed_precision_preset in {
+        "o_proj_w8",
+        "sparse_qkv_w8_o_proj_w8",
+    }
+    enable_sparse_qkv_w8 = mixed_precision_preset in {
+        "sparse_qkv_w8",
+        "sparse_qkv_w8_o_proj_w8",
+    }
+
+    if not enable_o_proj_w8 and not enable_sparse_qkv_w8:
+        raise ValueError(
+            "Unsupported SOAR_GPTQ_MIXED_PRECISION_PRESET: "
+            f"{mixed_precision_preset}. Supported values: o_proj_w8, sparse_qkv_w8, sparse_qkv_w8_o_proj_w8, off"
+        )
+
+    if enable_o_proj_w8:
         target_module = "self_attn.o_proj"
-        if target_module in exclude_modules:
-            return dynamic
-        if include_modules and target_module not in include_modules:
-            return dynamic
+        if target_module not in exclude_modules and (
+            not include_modules or target_module in include_modules
+        ):
+            dynamic[rf"+:.*{re.escape(target_module)}.*"] = {
+                "bits": _parse_int_env("SOAR_GPTQ_O_PROJ_BITS", 8),
+                "group_size": _parse_int_env("SOAR_GPTQ_O_PROJ_GROUP_SIZE", 128),
+            }
 
-        dynamic[rf"+:.*{re.escape(target_module)}.*"] = {
-            "bits": _parse_int_env("SOAR_GPTQ_O_PROJ_BITS", 8),
-            "group_size": _parse_int_env("SOAR_GPTQ_O_PROJ_GROUP_SIZE", 128),
-        }
-        return dynamic
-
-    if mixed_precision_preset == "sparse_qkv_w8":
+    if enable_sparse_qkv_w8:
         if model_config is None:
             raise ValueError(
                 "SOAR_GPTQ_MIXED_PRECISION_PRESET=sparse_qkv_w8 requires model_config"
@@ -498,13 +510,8 @@ def _build_dynamic_rules(
                 "bits": bits,
                 "group_size": group_size,
             }
-        return dynamic
 
-    else:
-        raise ValueError(
-            "Unsupported SOAR_GPTQ_MIXED_PRECISION_PRESET: "
-            f"{mixed_precision_preset}. Supported values: o_proj_w8, sparse_qkv_w8, off"
-        )
+    return dynamic
 
 
 def _is_module_mismatch_error(exc: Exception) -> bool:
