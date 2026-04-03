@@ -491,6 +491,13 @@ def _build_dynamic_rules(
                     "bits": bits,
                     "group_size": group_size,
                 }
+            # GPTQ preprocess sees unfused q/k/v module names, while SGLang runtime
+            # instantiates the fused qkv_proj parameter. Emit both names so the saved
+            # quantize config keeps preprocess-time and runtime-time packing aligned.
+            dynamic[rf"+:.*layers\.{layer_id}\.self_attn\.qkv_proj.*"] = {
+                "bits": bits,
+                "group_size": group_size,
+            }
         return dynamic
 
     else:
