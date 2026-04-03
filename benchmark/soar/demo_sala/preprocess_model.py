@@ -91,6 +91,20 @@ def _parse_int_env(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer, got: {value}") from exc
 
 
+def _parse_optional_int_list_env(name: str) -> Optional[List[int]]:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    raw = value.strip()
+    if raw == "":
+        return None
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    try:
+        return [int(part) for part in parts]
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a comma-separated integer list, got: {value}") from exc
+
+
 def _calibration_length_bucket(record: dict) -> str:
     prompt_tokens = record.get("prompt_tokens")
     if not isinstance(prompt_tokens, int):
@@ -399,7 +413,29 @@ def _include_value_for_attr(attr_name: str, modules: List[str]) -> Any:
     return modules
 
 
-def _build_dynamic_rules(include_modules: List[str], exclude_modules: List[str]) -> dict:
+def _resolve_sparse_layer_ids(model_config: dict) -> List[int]:
+    layer_ids = _parse_optional_int_list_env("SOAR_GPTQ_SPARSE_LAYER_IDS")
+    if layer_ids is not None:
+        return layer_ids
+
+    mixer_types = model_config.get("mixer_types")
+    if not isinstance(mixer_types, list):
+        return []
+
+    sparse_ids = [
+        index
+        for index, mixer_type in enumerate(mixer_types)
+        if isinstance(mixer_type, str)
+        and mixer_type.lower() in {"minicpm4", "minicpm", "standard", "attention", "attn"}
+    ]
+    return sparse_ids
+
+
+def _build_dynamic_rules(
+    include_modules: List[str],
+    exclude_modules: List[str],
+    model_config: Optional[dict] = None,
+) -> dict:
     dynamic = {}
 
     for module in exclude_modules:
@@ -412,24 +448,56 @@ def _build_dynamic_rules(include_modules: List[str], exclude_modules: List[str])
     if mixed_precision_preset in {"", "0", "off", "none"}:
         return dynamic
 
-    if mixed_precision_preset != "o_proj_w8":
+    if mixed_precision_preset == "o_proj_w8":
+        target_module = "self_attn.o_proj"
+        if target_module in exclude_modules:
+            return dynamic
+        if include_modules and target_module not in include_modules:
+            return dynamic
+
+        dynamic[rf"+:.*{re.escape(target_module)}.*"] = {
+            "bits": _parse_int_env("SOAR_GPTQ_O_PROJ_BITS", 8),
+            "group_size": _parse_int_env("SOAR_GPTQ_O_PROJ_GROUP_SIZE", 128),
+        }
+        return dynamic
+
+    if mixed_precision_preset == "sparse_qkv_w8":
+        if model_config is None:
+            raise ValueError(
+                "SOAR_GPTQ_MIXED_PRECISION_PRESET=sparse_qkv_w8 requires model_config"
+            )
+
+        sparse_layer_ids = _resolve_sparse_layer_ids(model_config)
+        if not sparse_layer_ids:
+            raise ValueError(
+                "SOAR_GPTQ_MIXED_PRECISION_PRESET=sparse_qkv_w8 could not resolve sparse layers. "
+                "Set SOAR_GPTQ_SPARSE_LAYER_IDS explicitly or verify config.mixer_types."
+            )
+
+        target_modules = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
+        enabled_modules = [
+            module
+            for module in target_modules
+            if module not in exclude_modules and (not include_modules or module in include_modules)
+        ]
+        if not enabled_modules:
+            return dynamic
+
+        bits = _parse_int_env("SOAR_GPTQ_SPARSE_QKV_BITS", 8)
+        group_size = _parse_int_env("SOAR_GPTQ_SPARSE_QKV_GROUP_SIZE", 128)
+        for layer_id in sparse_layer_ids:
+            for module in enabled_modules:
+                dynamic[rf"+:.*layers\.{layer_id}\.{re.escape(module)}.*"] = {
+                    "bits": bits,
+                    "group_size": group_size,
+                }
+        return dynamic
+
+    else:
         raise ValueError(
             "Unsupported SOAR_GPTQ_MIXED_PRECISION_PRESET: "
-            f"{mixed_precision_preset}. Supported values: o_proj_w8, off"
+            f"{mixed_precision_preset}. Supported values: o_proj_w8, sparse_qkv_w8, off"
         )
-
-    target_module = "self_attn.o_proj"
-    if target_module in exclude_modules:
-        return dynamic
-    if include_modules and target_module not in include_modules:
-        return dynamic
-
-    dynamic[rf"+:.*{re.escape(target_module)}.*"] = {
-        "bits": _parse_int_env("SOAR_GPTQ_O_PROJ_BITS", 8),
-        "group_size": _parse_int_env("SOAR_GPTQ_O_PROJ_GROUP_SIZE", 128),
-    }
-
-    return dynamic
 
 
 def _is_module_mismatch_error(exc: Exception) -> bool:
@@ -774,6 +842,7 @@ def run_gptq_quantization(
         max_samples=calibration_samples,
         text_field=calibration_field,
     )
+    model_config = json.loads((src / "config.json").read_text(encoding="utf-8"))
 
     default_include = [
         "self_attn.q_proj",
@@ -792,7 +861,11 @@ def run_gptq_quantization(
     exclude_set = set(exclude_modules)
     include_modules = [module for module in include_modules if module not in exclude_set]
 
-    dynamic_rules = _build_dynamic_rules(include_modules, exclude_modules) if layer_aware else None
+    dynamic_rules = (
+        _build_dynamic_rules(include_modules, exclude_modules, model_config=model_config)
+        if layer_aware
+        else None
+    )
     quant_config = QuantizeConfig(bits=bits, group_size=group_size, dynamic=dynamic_rules)
 
     trust_remote_code = _env_truthy("SOAR_TRUST_REMOTE_CODE", default=True)
@@ -871,7 +944,11 @@ def run_gptq_quantization(
                 f"error={exc} retry_include={retry_include} retry_exclude={retry_exclude}"
             )
 
-            retry_dynamic = _build_dynamic_rules(retry_include, retry_exclude)
+            retry_dynamic = _build_dynamic_rules(
+                retry_include,
+                retry_exclude,
+                model_config=model_config,
+            )
             retry_config = QuantizeConfig(
                 bits=bits,
                 group_size=group_size,
