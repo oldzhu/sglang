@@ -105,7 +105,7 @@ export SOAR_GPTQ_CALIBRATION_USE_PROMPT_TOKENS="${SOAR_GPTQ_CALIBRATION_USE_PROM
 export SOAR_GPTQ_BATCH_SIZE="${SOAR_GPTQ_BATCH_SIZE:-1}"
 export SOAR_GPTQ_BITS="${SOAR_GPTQ_BITS:-4}"
 export SOAR_GPTQ_GROUP_SIZE="${SOAR_GPTQ_GROUP_SIZE:-128}"
-export SOAR_GPTQ_MIXED_PRECISION_PRESET="${SOAR_GPTQ_MIXED_PRECISION_PRESET:-sparse_qkv_w8_o_proj_w8}"
+export SOAR_GPTQ_MIXED_PRECISION_PRESET="${SOAR_GPTQ_MIXED_PRECISION_PRESET:-sparse_qkv_w8}"
 export SOAR_GPTQ_O_PROJ_BITS="${SOAR_GPTQ_O_PROJ_BITS:-8}"
 export SOAR_GPTQ_O_PROJ_GROUP_SIZE="${SOAR_GPTQ_O_PROJ_GROUP_SIZE:-128}"
 export SOAR_GPTQ_SPARSE_QKV_BITS="${SOAR_GPTQ_SPARSE_QKV_BITS:-8}"
@@ -130,7 +130,7 @@ if [[ "$QUANT_MODE" == "gptq" ]]; then
 	if [[ "$SOAR_ENABLE_FUSED_QK_NORM_ROPE" == "1" || "$SOAR_ENABLE_FUSED_QK_NORM_ROPE" == "true" || "$SOAR_ENABLE_FUSED_QK_NORM_ROPE" == "TRUE" ]]; then
 		FUSED_QK_NORM_ROPE_ARG=" --enable-fused-qk-norm-rope"
 	fi
-	export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --trust-remote-code --disable-radix-cache --attention-backend minicpm_flashinfer --chunked-prefill-size 32768 --max-prefill-tokens 32768 --prefill-max-requests 1 --max-running-requests 20 --mem-fraction-static 0.84 --schedule-conservativeness 1.0 --skip-server-warmup --dense-as-sparse --quantization gptq_marlin --kv-cache-dtype fp8_e5m2 --force-dense-minicpm${FUSED_QK_NORM_ROPE_ARG}"
+	export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --trust-remote-code --disable-radix-cache --attention-backend minicpm_flashinfer --chunked-prefill-size 65536 --max-prefill-tokens 65536 --prefill-max-requests 1 --max-running-requests 32 --mem-fraction-static 0.87 --schedule-conservativeness 0.8 --enable-mixed-chunk --quantization gptq_marlin --kv-cache-dtype fp8_e5m2 --force-dense-minicpm${FUSED_QK_NORM_ROPE_ARG}"
 fi
 
 # export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --log-level info"
