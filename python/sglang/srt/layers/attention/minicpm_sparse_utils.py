@@ -597,14 +597,18 @@ def compressed_attention(
             torch.softmax(score, dim=-1, out=score)
             score = score.reshape(kv_head, batch_size, group_size, k1_len // batch_size).sum(dim=2)
         else:  
+            # Use original cu_seqlens_q (not adjusted) because q is not reshaped
+            # to fold heads_per_group into the token dimension.  The adjusted
+            # cu_seqlens multiply by heads_per_group, expecting q to have that
+            # many more rows, which causes OOB in the infllmv2 kernel.
             score = infllmv2_attn_stage1(
                 q.contiguous(),
                 k.contiguous(),
                 k2.contiguous(),
-                cu_seqlens_q=cu_seqlens_q_adjusted,
+                cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_k,
                 cu_seqlens_v=cu_seqlens_k2,
-                max_seqlen_q=max_seqlen_q_adjusted,
+                max_seqlen_q=max_seqlen_q,
                 max_seqlen_k=max_context_len // kernel_stride,
                 causal=is_prefilling
             )
