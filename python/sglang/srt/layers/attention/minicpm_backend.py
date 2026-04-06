@@ -1731,6 +1731,9 @@ class MiniCPMSparseBackend(AttentionBackend):
             metadata.sparse_cache_seqlens_int32[: 2 * real_bs].copy_(
                 forward_batch.sparse_cache_seqlens_int32_cpu
             )
+            # Zero stale tail entries so in-graph convert_sparse_page_table_to_flashinfer
+            # computes the same kv_indptr that replay passes to begin_forward.
+            metadata.sparse_cache_seqlens_int32[2 * real_bs :].fill_(0)
             metadata.sparse_cu_seqlens_k[: 2 * real_bs + 1].copy_(
                 forward_batch.sparse_cu_seqlens_k_cpu
             )
@@ -1747,11 +1750,9 @@ class MiniCPMSparseBackend(AttentionBackend):
                 sparse_real_bs = real_bs * 2
 
                 # Get views of pre-allocated buffers
-                # kv_indptr is precomputed and static: [0, 1*K, 2*K, ..., sparse_bs*K]
                 kv_indptr_view = self.decode_cuda_graph_metadata[
                     "flashinfer_kv_indptr"
                 ][: sparse_bs + 1]
-                # kv_indices only needs num_sparse_topk_tokens per batch
                 kv_indices_view = self.decode_cuda_graph_metadata[
                     "flashinfer_kv_indices"
                 ][: sparse_bs * self.num_sparse_topk_tokens]
@@ -1761,11 +1762,25 @@ class MiniCPMSparseBackend(AttentionBackend):
 
                 kv_last_page_len_view[sparse_real_bs:].fill_(0)
 
+                # Bug 4 fix: Write correct kv_indptr from actual sparse cache
+                # seqlens instead of the static [0, K, 2K, ...] pattern.
+                # sparse_cu_seqlens_k_cpu = pad(cumsum(sparse_cache_seqlens), (1,0))
+                # which matches what convert_sparse_page_table_to_flashinfer
+                # computes inside the captured CUDA graph.
+                kv_indptr_view[: sparse_real_bs + 1].copy_(
+                    forward_batch.sparse_cu_seqlens_k_cpu[: sparse_real_bs + 1]
+                )
+                # Pad remaining entries so FlashInfer sees zero-length sequences
+                if sparse_real_bs < sparse_bs:
+                    kv_indptr_view[sparse_real_bs + 1 :].fill_(
+                        kv_indptr_view[sparse_real_bs].item()
+                    )
+
                 # Retrieve the wrapper stored during capture
                 wrapper = metadata.decode_wrapper
 
-                # Update wrapper's cached metadata using begin_forward
-                # This updates the wrapper internal state stored during capture
+                # Replan with the correct kv_indptr so workspace partitioning
+                # matches what the captured graph will produce at runtime.
                 wrapper.begin_forward(
                     kv_indptr_view,
                     kv_indices_view,
@@ -1784,7 +1799,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 # Synchronize to ensure GPU operations complete before graph replay
                 torch.cuda.synchronize()
 
-                # Store the views for reference (not used in forward, wrapper provides access)
+                # Store the views for reference
                 metadata.flashinfer_kv_indptr = kv_indptr_view
                 metadata.flashinfer_kv_indices = kv_indices_view
                 metadata.flashinfer_kv_last_page_len = kv_last_page_len_view

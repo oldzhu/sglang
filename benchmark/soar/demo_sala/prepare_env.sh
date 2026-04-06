@@ -130,7 +130,7 @@ if [[ "$QUANT_MODE" == "gptq" ]]; then
 	if [[ "$SOAR_ENABLE_FUSED_QK_NORM_ROPE" == "1" || "$SOAR_ENABLE_FUSED_QK_NORM_ROPE" == "true" || "$SOAR_ENABLE_FUSED_QK_NORM_ROPE" == "TRUE" ]]; then
 		FUSED_QK_NORM_ROPE_ARG=" --enable-fused-qk-norm-rope"
 	fi
-	export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --trust-remote-code --disable-radix-cache --attention-backend minicpm_flashinfer --chunked-prefill-size 32768 --max-prefill-tokens 32768 --prefill-max-requests 1 --max-running-requests 20 --mem-fraction-static 0.84 --schedule-conservativeness 1.0 --dense-as-sparse --quantization gptq_marlin --kv-cache-dtype fp8_e5m2 --force-dense-minicpm${FUSED_QK_NORM_ROPE_ARG}"
+	export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --trust-remote-code --disable-radix-cache --attention-backend minicpm_flashinfer --chunked-prefill-size 32768 --max-prefill-tokens 32768 --prefill-max-requests 1 --max-running-requests 20 --mem-fraction-static 0.84 --schedule-conservativeness 1.0 --dense-as-sparse --quantization gptq_marlin --kv-cache-dtype fp8_e5m2${FUSED_QK_NORM_ROPE_ARG}"
 fi
 
 # export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --log-level info"
