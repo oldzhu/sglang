@@ -263,7 +263,10 @@ class MiniCPMAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         if self.attn_use_rope:
+            orig_dtype = q.dtype
+            q, k = q.float(), k.float()
             q, k = self.rotary_emb(positions, q, k)
+            q, k = q.to(orig_dtype), k.to(orig_dtype)
 
         attn_output = self.attn(q, k, v, forward_batch)
 
@@ -412,7 +415,10 @@ class MiniCPMLightningMixer(nn.Module):
             if self.use_rope:
                 q = q.reshape(-1, self.num_heads * self.head_dim)
                 k = k.reshape(-1, self.num_kv_heads * self.head_dim)
+                orig_dtype = q.dtype
+                q, k = q.float(), k.float()
                 q, k = self.rotary_emb(positions, q, k)
+                q, k = q.to(orig_dtype), k.to(orig_dtype)
 
             return q, k, v
 
