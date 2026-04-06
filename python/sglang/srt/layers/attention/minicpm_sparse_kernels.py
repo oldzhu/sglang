@@ -39,7 +39,7 @@ def compress_k_to_scratch_kernel(
             token_y = token_start + token_offset
             token_k_indices = tl.load(
                 token_table_ptr + batch_idx * token_table_cols + token_y
-            ).to(tl.int32)
+            ).to(tl.int64)
             key_base_offset = token_k_indices * head_num_k * head_dim + head_idx * head_dim
             x = tl.load(
                 key_cache_ptr + key_base_offset + tl.arange(0, BLOCK_SIZE),
@@ -94,7 +94,7 @@ def compress_k_to_scratch_kernel_padded(
             token_y = token_start + token_offset
             token_k_indices = tl.load(
                 token_table_ptr + batch_idx * token_table_cols + token_y
-            ).to(tl.int32)
+            ).to(tl.int64)
             key_base_offset = token_k_indices * head_num_k * head_dim + head_idx * head_dim
             x = tl.load(
                 key_cache_ptr + key_base_offset + tl.arange(0, BLOCK_SIZE),
@@ -231,7 +231,7 @@ def compress_k_complete_kernel_new(
             global_full_idx = cu_total_start + history_chunk_idx
 
             # Read from compressed_k_table: indices at y = history_chunk_idx
-            full_compressed_idx = tl.load(compressed_k_table_ptr + batch_idx * compressed_k_table_cols + history_chunk_idx).to(tl.int32)
+            full_compressed_idx = tl.load(compressed_k_table_ptr + batch_idx * compressed_k_table_cols + history_chunk_idx).to(tl.int64)
 
             # Read from key_cache and store to full_compressed_k output
             key_cache_offset = full_compressed_idx * head_num_k * head_dim
@@ -268,7 +268,7 @@ def compress_k_complete_kernel_new(
             # Use nested if instead of continue (Triton doesn't support continue)
             if y < token_table_cols:
                 # Read k_indices from token_table
-                k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + y).to(tl.int32)
+                k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + y).to(tl.int64)
 
                 # Compute y index in compressed_k_table for new_compressed_k_indices
                 # y = new_chunk_idx + history_compress
@@ -276,7 +276,7 @@ def compress_k_complete_kernel_new(
 
                 if compressed_table_y < compressed_k_table_cols:
                     # Read new_compressed_k_indices from compressed_k_table
-                    new_compressed_k_indices = tl.load(compressed_k_table_ptr + batch_idx * compressed_k_table_cols + compressed_table_y).to(tl.int32)
+                    new_compressed_k_indices = tl.load(compressed_k_table_ptr + batch_idx * compressed_k_table_cols + compressed_table_y).to(tl.int64)
 
                     # ====================================================================
                     # PHASE 3: Perform mean pooling compression on k
@@ -291,7 +291,7 @@ def compress_k_complete_kernel_new(
 
                         # Read k_indices from token_table
                         if token_y < token_table_cols:
-                            token_k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + token_y).to(tl.int32)
+                            token_k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + token_y).to(tl.int64)
                         else:
                             token_k_indices = 0
 
@@ -326,7 +326,7 @@ def compress_k_complete_kernel_new(
                                 token_y = (new_chunk_idx * kernel_stride + token_offset) + history_compress * k_stride
 
                                 if token_y < token_table_cols:
-                                    token_k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + token_y).to(tl.int32)
+                                    token_k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + token_y).to(tl.int64)
                                 else:
                                     token_k_indices = 0
 
@@ -360,7 +360,7 @@ def compress_k_complete_kernel_new(
 
                         # Read full_compressed_k_indices from compressed_k_table
                         full_table_y = history_compress + new_chunk_idx
-                        full_compressed_idx = tl.load(compressed_k_table_ptr + batch_idx * compressed_k_table_cols + full_table_y).to(tl.int32)
+                        full_compressed_idx = tl.load(compressed_k_table_ptr + batch_idx * compressed_k_table_cols + full_table_y).to(tl.int64)
 
                         # Read from key_cache and store to full_compressed_k output buffer
                         key_cache_offset = full_compressed_idx * head_num_k * head_dim
@@ -477,7 +477,7 @@ def compress_k_complete_kernel_new_padded(
             global_full_idx = batch_idx * max_chunks_per_seq + history_chunk_idx
 
             # Read from compressed_k_table
-            full_compressed_idx = tl.load(compressed_k_table_ptr + batch_idx * compressed_k_table_cols + history_chunk_idx).to(tl.int32)
+            full_compressed_idx = tl.load(compressed_k_table_ptr + batch_idx * compressed_k_table_cols + history_chunk_idx).to(tl.int64)
 
             # Read from key_cache and store to full_compressed_k output
             key_cache_offset = full_compressed_idx * head_num_k * head_dim
@@ -509,11 +509,11 @@ def compress_k_complete_kernel_new_padded(
 
             # Use nested if instead of continue (Triton doesn't support continue)
             if y < token_table_cols:
-                k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + y).to(tl.int32)
+                k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + y).to(tl.int64)
                 compressed_table_y = new_chunk_idx + history_compress
 
                 if compressed_table_y < compressed_k_table_cols:
-                    new_compressed_k_indices = tl.load(compressed_k_table_ptr + batch_idx * compressed_k_table_cols + compressed_table_y).to(tl.int32)
+                    new_compressed_k_indices = tl.load(compressed_k_table_ptr + batch_idx * compressed_k_table_cols + compressed_table_y).to(tl.int64)
 
                     # ====================================================================
                     # PHASE 3: Perform mean pooling compression on k
@@ -525,7 +525,7 @@ def compress_k_complete_kernel_new_padded(
                         token_y = (new_chunk_idx * kernel_stride + token_offset) + history_compress * k_stride
 
                         if token_y < token_table_cols:
-                            token_k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + token_y).to(tl.int32)
+                            token_k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + token_y).to(tl.int64)
                         else:
                             token_k_indices = 0
 
@@ -555,7 +555,7 @@ def compress_k_complete_kernel_new_padded(
                                 token_y = (new_chunk_idx * kernel_stride + token_offset) + history_compress * k_stride
 
                                 if token_y < token_table_cols:
-                                    token_k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + token_y).to(tl.int32)
+                                    token_k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + token_y).to(tl.int64)
                                 else:
                                     token_k_indices = 0
 
@@ -587,7 +587,7 @@ def compress_k_complete_kernel_new_padded(
                         global_full_idx = batch_idx * max_chunks_per_seq + history_compress + new_chunk_idx
 
                         full_table_y = history_compress + new_chunk_idx
-                        full_compressed_idx = tl.load(compressed_k_table_ptr + batch_idx * compressed_k_table_cols + full_table_y).to(tl.int32)
+                        full_compressed_idx = tl.load(compressed_k_table_ptr + batch_idx * compressed_k_table_cols + full_table_y).to(tl.int64)
 
                         key_cache_offset = full_compressed_idx * head_num_k * head_dim
 
