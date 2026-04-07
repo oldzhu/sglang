@@ -64,6 +64,30 @@ This repository is used for SOAR 2026 optimization work on MiniCPM-SALA.
    - https://soar.openbmb.cn/toolkit
 - For submission-related customization, align scripts with official execution model and interfaces (including `prepare_env.sh` and `prepare_model.sh --input/--output` contract), and state any assumptions if local/fcloud environment differs from official runtime.
 
+## fcloud automated testing
+
+The workspace includes automation scripts for remote testing on the fcloud instance:
+
+- **Scripts location**: `scripts/fcloud/fcloud_exec.py` (JupyterLab terminal API client), `scripts/fcloud/fcloud_workflow.py` (test workflow orchestrator)
+- **Config**: `~/.fcloud_config` stores `FCLOUD_URL` and `FCLOUD_TOKEN`
+- **Available commands**:
+  - `python3 scripts/fcloud/fcloud_workflow.py sync` — git pull + copy changed files to fcloud
+  - `python3 scripts/fcloud/fcloud_workflow.py restart-server` — kill old server and start new one
+  - `python3 scripts/fcloud/fcloud_workflow.py wait-server` — wait until server health check passes
+  - `python3 scripts/fcloud/fcloud_workflow.py accuracy` — run accuracy eval
+  - `python3 scripts/fcloud/fcloud_workflow.py speed --variant s1|s8|smax|all` — run speed benchmarks
+  - `python3 scripts/fcloud/fcloud_workflow.py full` — sync + restart + accuracy (full pipeline)
+  - `python3 scripts/fcloud/fcloud_workflow.py server-logs --lines N` — view server logs
+- **fcloud paths**:
+  - Repo: `/root/sglang-minicpm`
+  - Models: `/root/models/openbmb/MiniCPM-SALA-90-qa-cwe-mcq-sparse_qkv_w8` (GPTQ), `/root/models/openbmb/MiniCPM-SALA-Copy` (non-quantized)
+  - Eval script: `/root/data/eval_model_001.py` (uses `--data_path /root/data/perf_public_set.jsonl`)
+  - Speed data: `/root/data/benchmark/soar/data/speed_{s1,s8,smax}.jsonl`
+  - Submission sim: `/root/submission_sim`
+- **Pre-launch requirement**: Always run `source /root/submission_sim/prepare_env.sh` before starting sglang server to set `PYTORCH_CUDA_ALLOC_CONF` (avoids CUDA OOM)
+
+**IMPORTANT**: Always ask the user for explicit approval before starting any fcloud automated test (sync, restart, accuracy, speed, or full). The fcloud instance is a shared resource — never run tests without user confirmation.
+
 ## Prioritization strategy
 
 1. Low-risk, high-impact runtime optimizations first.

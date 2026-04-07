@@ -295,7 +295,7 @@ def compress_k_complete_kernel_new(
                         if token_y < token_table_cols:
                             token_k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + token_y).to(tl.int64)
                         else:
-                            token_k_indices = 0
+                            token_k_indices = tl.zeros([], dtype=tl.int64)
 
                         # Load k from key_cache: key_cache[token_k_indices, head_idx, :]
                         key_base_offset = token_k_indices * head_num_k * head_dim + head_idx * head_dim
@@ -330,7 +330,7 @@ def compress_k_complete_kernel_new(
                                 if token_y < token_table_cols:
                                     token_k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + token_y).to(tl.int64)
                                 else:
-                                    token_k_indices = 0
+                                    token_k_indices = tl.zeros([], dtype=tl.int64)
 
                                 key_base_offset = token_k_indices * head_num_k * head_dim + h * head_dim
 
@@ -529,7 +529,7 @@ def compress_k_complete_kernel_new_padded(
                         if token_y < token_table_cols:
                             token_k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + token_y).to(tl.int64)
                         else:
-                            token_k_indices = 0
+                            token_k_indices = tl.zeros([], dtype=tl.int64)
 
                         key_base_offset = token_k_indices * head_num_k * head_dim + head_idx * head_dim
 
@@ -559,7 +559,7 @@ def compress_k_complete_kernel_new_padded(
                                 if token_y < token_table_cols:
                                     token_k_indices = tl.load(token_table_ptr + batch_idx * token_table_cols + token_y).to(tl.int64)
                                 else:
-                                    token_k_indices = 0
+                                    token_k_indices = tl.zeros([], dtype=tl.int64)
 
                                 key_base_offset = token_k_indices * head_num_k * head_dim + h * head_dim
 
