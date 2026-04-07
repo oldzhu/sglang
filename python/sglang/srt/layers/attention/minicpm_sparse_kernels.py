@@ -11,6 +11,7 @@ def compress_k_to_scratch_kernel(
     total_compress_token_nums_ptr,
     cu_total_compress_token_nums_ptr,
     full_compressed_k_ptr,
+    k_scale,
     batch_size,
     token_table_cols,
     head_num_k: tl.constexpr,
@@ -45,7 +46,7 @@ def compress_k_to_scratch_kernel(
                 key_cache_ptr + key_base_offset + tl.arange(0, BLOCK_SIZE),
                 mask=tl.arange(0, BLOCK_SIZE) < head_dim,
                 other=0.0,
-            ).to(tl.float32)
+            ).to(tl.float32) * k_scale
             acc += x
 
         acc = acc / kernel_size
@@ -66,6 +67,7 @@ def compress_k_to_scratch_kernel_padded(
     token_table_ptr,
     total_compress_token_nums_ptr,
     full_compressed_k_ptr,
+    k_scale,
     batch_size,
     max_chunks_per_seq,
     token_table_cols,
@@ -100,7 +102,7 @@ def compress_k_to_scratch_kernel_padded(
                 key_cache_ptr + key_base_offset + tl.arange(0, BLOCK_SIZE),
                 mask=tl.arange(0, BLOCK_SIZE) < head_dim,
                 other=0.0,
-            ).to(tl.float32)
+            ).to(tl.float32) * k_scale
             acc += x
 
         acc = acc / kernel_size

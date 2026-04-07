@@ -176,12 +176,16 @@ def get_compress_k_v2(
         max_grid_chunks_k1 = min(max_chunks_k1, 1024)
         max_grid_chunks_k2 = min(max_chunks_k2, 1024)
 
+        # When KV cache is FP8, descale keys so compressed scratch is in real value range
+        k_scale = float(layer.k_scale.item()) if layer.k_scale is not None else 1.0
+
         compress_k_to_scratch_kernel[(batch, max_grid_chunks_k1, layer.tp_k_head_num)](
             key_cache,
             metadata.page_table,
             metadata.k1.total_compress_token_nums,
             metadata.k1.cu_total_compress_token_nums,
             full_compressed_k1,
+            k_scale,
             batch,
             metadata.page_table.shape[1],
             layer.tp_k_head_num,
@@ -198,6 +202,7 @@ def get_compress_k_v2(
             metadata.k2.total_compress_token_nums,
             metadata.k2.cu_total_compress_token_nums,
             full_compressed_k2,
+            k_scale,
             batch,
             metadata.page_table.shape[1],
             layer.tp_k_head_num,
@@ -342,11 +347,15 @@ def get_compress_k_v2_padded(
         max_grid_chunks_k1 = min(max_chunks_k1, 1024)
         max_grid_chunks_k2 = min(max_chunks_k2, 1024)
 
+        # When KV cache is FP8, descale keys so compressed scratch is in real value range
+        k_scale = float(layer.k_scale.item()) if layer.k_scale is not None else 1.0
+
         compress_k_to_scratch_kernel_padded[(batch, max_grid_chunks_k1, layer.tp_k_head_num)](
             key_cache,
             metadata.page_table,
             metadata.k1.total_compress_token_nums,
             full_compressed_k1,
+            k_scale,
             batch,
             max_chunks_k1,
             metadata.page_table.shape[1],
@@ -363,6 +372,7 @@ def get_compress_k_v2_padded(
             metadata.page_table,
             metadata.k2.total_compress_token_nums,
             full_compressed_k2,
+            k_scale,
             batch,
             max_chunks_k2,
             metadata.page_table.shape[1],
