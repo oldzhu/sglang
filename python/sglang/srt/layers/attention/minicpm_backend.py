@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -13,6 +14,8 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMo
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.spec_info import SpecInput
 from sglang.srt.utils import is_flashinfer_available
+
+logger = logging.getLogger(__name__)
 
 # FlashInfer wrapper imports for CUDA graph support
 from flashinfer import BatchDecodeWithPagedKVCacheWrapper
@@ -233,8 +236,11 @@ class MiniCPMSparseBackend(AttentionBackend):
         topk = hf_config.sparse_topk
         self.use_nope = hf_config.sparse_use_nope
         self.local_blocks = self.window_size // self.block_size  # local_blocks
-        self.sparse_topk = topk + (self.window_size // self.block_size)
+        topk_scale = getattr(model_runner.server_args, 'sparse_topk_scale', 1)
+        self.sparse_topk = (topk * topk_scale) + self.local_blocks
         self.num_sparse_topk_tokens = self.block_size * self.sparse_topk
+        if topk_scale != 1:
+            logger.info(f"Sparse topk scaled: config_topk={topk} × scale={topk_scale} + local_blocks={self.local_blocks} = {self.sparse_topk}")
 
         # Head group number derived from model configuration
         self.head_dim = model_runner.model_config.head_dim

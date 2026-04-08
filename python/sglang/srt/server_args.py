@@ -532,6 +532,7 @@ class ServerArgs:
     disable_cuda_graph_padding: bool = False
     fuse_topk: bool = False
     split_stage1: bool = False
+    sparse_topk_scale: int = 1
     dense_as_sparse: bool = False
     force_dense_minicpm: bool = False
     enable_profile_cuda_graph: bool = False
@@ -4013,6 +4014,12 @@ class ServerArgs:
             "--split-stage1",
             action="store_true",
             help="split stage1 into bmm+softmax+reduce_sum in minicpm",
+        )
+        parser.add_argument(
+            "--sparse-topk-scale",
+            type=int,
+            default=1,
+            help="Multiply sparse_topk by this factor to increase GPTQ tolerance (default: 1, try 2 or 3)",
         )
         parser.add_argument(
             "--dense-as-sparse",

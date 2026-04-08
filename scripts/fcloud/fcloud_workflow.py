@@ -207,7 +207,7 @@ def step_accuracy(base_url, token, timeout=1800):
         f"--api_base {API_BASE} "
         f"--model_path {MODEL_PATH} "
         f"--data_path {FCLOUD_DATA}/perf_public_set.jsonl "
-        f"--concurrency 8 2>&1"
+        f"--concurrency 32 2>&1"
     )
     _, out = fcloud_run(base_url, token, cmd, timeout=timeout)
     print(out)
@@ -310,6 +310,8 @@ def main():
     p_logs = sub.add_parser("server-logs", help="Show server logs")
     p_logs.add_argument("--lines", type=int, default=100)
 
+    sub.add_parser("shutdown", help="Shut down the fcloud instance")
+
     args = parser.parse_args()
     base_url, token = fcloud_exec.load_config()
 
@@ -327,6 +329,10 @@ def main():
         step_speed(base_url, token, args.variant)
     elif args.action == "server-logs":
         step_server_logs(base_url, token, args.lines)
+    elif args.action == "shutdown":
+        print_section("SHUTDOWN")
+        fcloud_exec.shutdown_server(base_url, token)
+        print("[shutdown] fcloud instance shutdown initiated")
 
 
 if __name__ == "__main__":
