@@ -64,6 +64,13 @@ This repository is used for SOAR 2026 optimization work on MiniCPM-SALA.
    - https://soar.openbmb.cn/toolkit
 - For submission-related customization, align scripts with official execution model and interfaces (including `prepare_env.sh` and `prepare_model.sh --input/--output` contract), and state any assumptions if local/fcloud environment differs from official runtime.
 
+## Test results tracking (mandatory)
+
+- **All automated test results** (accuracy and speed benchmarks) must be recorded in:
+  `docs/soar_2026_changes/TEST_RESULTS_TRACKING.md`
+- After every accuracy or speed test completes, update the corresponding table in that file with the test number, date, commit, config, and all result metrics.
+- This file is the single source of truth for comparing configurations across test runs.
+
 ## fcloud automated testing
 
 The workspace includes automation scripts for remote testing on the fcloud instance:
@@ -78,6 +85,7 @@ The workspace includes automation scripts for remote testing on the fcloud insta
   - `python3 scripts/fcloud/fcloud_workflow.py speed --variant s1|s8|smax|all` — run speed benchmarks
   - `python3 scripts/fcloud/fcloud_workflow.py full` — sync + restart + accuracy (full pipeline)
   - `python3 scripts/fcloud/fcloud_workflow.py server-logs --lines N` — view server logs
+  - `python3 scripts/fcloud/fcloud_workflow.py shutdown` — shut down the fcloud instance to save cost
 - **fcloud paths**:
   - Repo: `/root/sglang-minicpm`
   - Models: `/root/models/openbmb/MiniCPM-SALA-90-qa-cwe-mcq-sparse_qkv_w8` (GPTQ), `/root/models/openbmb/MiniCPM-SALA-Copy` (non-quantized)
@@ -87,6 +95,11 @@ The workspace includes automation scripts for remote testing on the fcloud insta
 - **Pre-launch requirement**: Always run `source /root/submission_sim/prepare_env.sh` before starting sglang server to set `PYTORCH_CUDA_ALLOC_CONF` (avoids CUDA OOM)
 
 **IMPORTANT**: Always ask the user for explicit approval before starting any fcloud automated test (sync, restart, accuracy, speed, or full). The fcloud instance is a shared resource — never run tests without user confirmation.
+
+**COST-SAVING RULE (mandatory)**:
+- After each round of automated fcloud testing completes and you have collected all outputs needed for analysis, **immediately shut down the fcloud instance** by running `python3 scripts/fcloud/fcloud_workflow.py shutdown` in the terminal. Do not leave it running while analyzing results or planning next steps.
+- When you need to start a new round of testing, **ask the user to start the fcloud instance** before running any fcloud commands. Do not assume it is already running.
+- Workflow: user starts fcloud → agent runs tests → agent collects output → agent runs shutdown command → agent analyzes results offline → agent proposes next steps → repeat.
 
 ## Prioritization strategy
 
