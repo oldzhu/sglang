@@ -225,9 +225,9 @@ def step_speed(base_url, token, variant="s1", timeout=600):
         return results
 
     SPEED_DATA = {
-        "s1": "/root/data/benchmark/soar/data/speed_s1.jsonl",
-        "s8": "/root/data/benchmark/soar/data/speed_s8.jsonl",
-        "smax": "/root/data/benchmark/soar/data/speed_smax.jsonl",
+        "s1": "/root/data/speed_s1.jsonl",
+        "s8": "/root/data/speed_s8.jsonl",
+        "smax": "/root/data/speed_smax.jsonl",
     }
 
     data_file = SPEED_DATA.get(variant)

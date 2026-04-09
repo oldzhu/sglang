@@ -24,7 +24,8 @@ Every test run should be logged here with its configuration, commit, date, and r
 | 7 | 2026-04-08 | HEAD−0070 | 223.167.85.181 | GPTQ + FP8 KV + dense | 78.84% | — | 0.8 | 56.67% | 82% | 98.89% | 100% | 56.67% | — | — | Dense tolerates GPTQ+FP8 well |
 | 8 | 2026-04-09 | 687ac4127 | 223.167.85.183 | GPTQ + FP8 KV + sparse + topk_scale=2 | 0% | 0% | 0 | — | — | — | — | — | — | — | OOM crash: page table 4.6 GiB (topk=160) |
 | 8b | 2026-04-09 | 9d3ecd168 | 223.167.85.183 | GPTQ + FP8 KV + sparse (default topk=96) | **76.07%** | 95.08% | 0 | 60% | 60.33% | 96.67% | 96.67% | 66.67% | 2411s | 99.73 | Freshly prepared GPTQ model; huge improvement vs old Test 5 |
-| 9 | 2026-04-09 | 79e49f39f | 223.167.85.183 | GPTQ + bf16 KV + sparse (Option D) | _pending_ | — | — | — | — | — | — | — | — | — | Removed --kv-cache-dtype fp8_e5m2 |
+| 9 | 2026-04-09 | 79e49f39f | 223.167.85.183 | GPTQ + bf16 KV + sparse (Option D) | **79.67%** | **99.58%** | **0.8** | 63.33% | 81.67% | 100% | 96.67% | 56.67% | 3157s | 275.20 | **Best GPTQ+sparse config!** bf16 KV eliminates FP8 scoring error |
+| 10 | 2026-04-09 | 430dd221c | 223.167.85.183 | GPTQ + bf16 KV + sparse + topk_scale=2 (Option C) | 0.20% | 0.25% | 0 | 0% | 1% | 0% | 0% | 0% | 9385s | 661.10 | **BROKEN**: topk_scale=2 causes garbage output (avg 41K output tokens) |
 
 ---
 
@@ -32,7 +33,7 @@ Every test run should be logged here with its configuration, commit, date, and r
 
 | Test # | Date | Commit | Config | S1 | S8 | Smax | Weighted Speed Score | Notes |
 |--------|------|--------|--------|----|----|------|---------------------|-------|
-| _(no speed tests yet on new fcloud)_ | | | | | | | | |
+| 9-spd | 2026-04-09 | 79e49f39f | GPTQ + bf16 KV + sparse (Option D) | 139.28s | 56.97s | 48.33s | — | First speed test on new fcloud |
 
 ---
 
