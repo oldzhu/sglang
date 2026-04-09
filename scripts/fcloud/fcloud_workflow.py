@@ -199,7 +199,7 @@ def step_wait_server(base_url, token, timeout=300):
     return False
 
 
-def step_accuracy(base_url, token, timeout=1800):
+def step_accuracy(base_url, token, timeout=3600):
     """Run accuracy evaluation."""
     print_section("ACCURACY TEST")
     cmd = (
