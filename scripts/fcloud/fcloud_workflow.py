@@ -202,6 +202,10 @@ def step_wait_server(base_url, token, timeout=300):
 def step_accuracy(base_url, token, timeout=3600):
     """Run accuracy evaluation."""
     print_section("ACCURACY TEST")
+    # Kill any leftover eval processes to avoid duplicate requests
+    fcloud_run(base_url, token,
+               'pkill -f "eval_model" 2>/dev/null; sleep 1; echo "cleaned"',
+               timeout=10)
     cmd = (
         f"cd {FCLOUD_DATA} && python3 eval_model_001.py "
         f"--api_base {API_BASE} "
