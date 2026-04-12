@@ -43,12 +43,49 @@ This repository is used for SOAR 2026 optimization work on MiniCPM-SALA.
    - User applies/runs commands in fcloud instance and reports metrics/errors.
    - Agent iterates based on returned results.
 
+## Official Scoring & Ranking Rules (from https://soar.openbmb.cn/competition, verified 2026-04-12)
+
+### Final Score (HIGHER = BETTER)
+```
+Final Score = Performance Score × Correctness Coefficient C
+```
+
+### Performance Score (relative to best player)
+```
+Performance Score = S₁ × 40% + S₈ × 30% + S∞ × 30%
+S_N = (Duration_best / Duration_player) × 100
+```
+- `Duration_best` = shortest benchmark_duration among ALL players for that concurrency tier
+- Fastest player scores 100 per tier; others score proportionally less
+
+### Correctness Coefficient C (4 tiers)
+| Normalized Accuracy | C |
+|---------------------|-----|
+| ≤ 97% | 0 (eliminated) |
+| (97%, 98%] | 0.92 |
+| (98%, 99%] | 0.96 |
+| (99%, 100%] | 1.0 |
+
+### Concurrency Tiers
+| Tier | Flag | Weight |
+|------|------|--------|
+| S₁ | `--max-concurrent 1` | 40% |
+| S₈ | `--max-concurrent 8` | 30% |
+| S∞ | no `--max-concurrent` | 30% |
+
+### Submission Constraints
+- All files ≤ 2GB total
+- Quantized models must be quantized on-site (cannot submit pre-quantized weights)
+- Quantization + evaluation time ≤ 5 hours
+- Speculative heads allowed (count toward 2GB)
+- Code: Apache 2.0, reproducible, explainable
+
 ## Competition guardrails (must enforce)
 
-- Keep model correctness above SOAR threshold (accuracy coefficient must not be zero).
+- Keep normalized accuracy > 97% so C ≠ 0 (ideally > 99% for C=1.0).
 - Do not rely on forbidden tricks (e.g., privately re-enabling prefix cache during official eval).
-- Respect fixed concurrency evaluation settings.
-- Keep submission package constraints in mind (including size/time limits and reproducibility).
+- Respect fixed concurrency evaluation settings (`--flush-cache`, fixed `--max-concurrent`).
+- Keep submission package constraints in mind (≤ 2GB, on-site quantization, ≤ 5h total).
 
 ## Rule freshness requirement (must enforce)
 
@@ -58,11 +95,35 @@ This repository is used for SOAR 2026 optimization work on MiniCPM-SALA.
 - Before starting optimization/customization stages, explicitly review and refer to the `技术路径指引` section on the toolkit page to align with officially suggested technical directions.
 - If any conflict appears between prior assumptions and latest official text, follow the official pages and explicitly call out the update.
 
+## Leaderboard tracking requirement (must enforce)
+
+- Our team name is **team-beta** (currently #19, score 56.63). Target: **top 5** (currently ≥79.55).
+- After every official submission that produces a new score, **immediately**:
+   1. Fetch leaderboard from https://soar.openbmb.cn/leaderboard
+   2. Record team-beta's updated rank and score
+   3. Record top 5 teams' scores
+   4. Calculate remaining gap to #5 and improvement ratio needed
+   5. Assess whether any top 5 teams improved (moving target)
+   6. Update `/memories/soar_2026_leaderboard.md` with the new snapshot
+- Use this gap analysis to prioritize next optimization direction:
+   - If gap > 30%: need fundamental speed improvement (kernel optimization, speculative decoding, architecture changes)
+   - If gap 10-30%: targeted optimizations (operator fusion, scheduling tuning, memory layout)
+   - If gap < 10%: fine-tuning (server arg tweaks, batch sizing, minor kernel improvements)
+
 ## Submission preparation requirement (must enforce)
 
 - When the task involves preparing competition submission artifacts (e.g., `prepare_env.sh`, `prepare_model.sh`, `preprocess_model.py`, packaging layout), explicitly refer to and follow the latest `提交说明` section on:
    - https://soar.openbmb.cn/toolkit
 - For submission-related customization, align scripts with official execution model and interfaces (including `prepare_env.sh` and `prepare_model.sh --input/--output` contract), and state any assumptions if local/fcloud environment differs from official runtime.
+
+### Official submission packaging steps (fcloud)
+1. On fcloud: `cd /root/submission_sim`
+2. Create tarball:
+   ```bash
+   tar --exclude='__pycache__' --exclude='*.pyc' -czf /root/minicpm_sala_submit_v<VERSION>.tar.gz *.whl *.sh *.py perf_public_set.jsonl sglang
+   ```
+3. Download the `.tar.gz` from fcloud to local `benchmark/soar/demo_sala/`
+4. Upload to official site manually
 
 ## Test results tracking (mandatory)
 
@@ -78,6 +139,7 @@ The workspace includes automation scripts for remote testing on the fcloud insta
 - **Scripts location**: `scripts/fcloud/fcloud_exec.py` (JupyterLab terminal API client), `scripts/fcloud/fcloud_workflow.py` (test workflow orchestrator)
 - **Config**: `~/.fcloud_config` stores `FCLOUD_URL` and `FCLOUD_TOKEN`
 - **Available commands**:
+  - `python3 scripts/fcloud/fcloud_workflow.py setup` — bootstrap a clean fcloud instance (clone, upload, extract, sync)
   - `python3 scripts/fcloud/fcloud_workflow.py sync` — git pull + copy changed files to fcloud
   - `python3 scripts/fcloud/fcloud_workflow.py restart-server` — kill old server and start new one
   - `python3 scripts/fcloud/fcloud_workflow.py wait-server` — wait until server health check passes
@@ -90,7 +152,7 @@ The workspace includes automation scripts for remote testing on the fcloud insta
   - Repo: `/root/sglang-minicpm`
   - Models: `/root/models/openbmb/MiniCPM-SALA-90-qa-cwe-mcq-sparse_qkv_w8` (GPTQ), `/root/models/openbmb/MiniCPM-SALA-Copy` (non-quantized)
   - Eval script: `/root/data/eval_model_001.py` (uses `--data_path /root/data/perf_public_set.jsonl`)
-  - Speed data: `/root/data/benchmark/soar/data/speed_{s1,s8,smax}.jsonl`
+  - Speed data: `/root/data/speed_{s1,s8,smax}.jsonl`
   - Submission sim: `/root/submission_sim`
 - **Pre-launch requirement**: Always run `source /root/submission_sim/prepare_env.sh` before starting sglang server to set `PYTORCH_CUDA_ALLOC_CONF` (avoids CUDA OOM)
 
@@ -100,6 +162,35 @@ The workspace includes automation scripts for remote testing on the fcloud insta
 - After each round of automated fcloud testing completes and you have collected all outputs needed for analysis, **immediately shut down the fcloud instance** by running `python3 scripts/fcloud/fcloud_workflow.py shutdown` in the terminal. Do not leave it running while analyzing results or planning next steps.
 - When you need to start a new round of testing, **ask the user to start the fcloud instance** before running any fcloud commands. Do not assume it is already running.
 - Workflow: user starts fcloud → agent runs tests → agent collects output → agent runs shutdown command → agent analyzes results offline → agent proposes next steps → repeat.
+
+## fcloud instance setup / re-setup (mandatory)
+
+When a new or restored fcloud instance needs bootstrapping, use the automated setup command:
+
+```bash
+python3 scripts/fcloud/fcloud_workflow.py setup          # skip existing paths
+python3 scripts/fcloud/fcloud_workflow.py setup --force   # re-setup everything
+```
+
+**Pre-requisites for setup** (must exist locally before running):
+- `benchmark/soar/demo_sala/submission_sim.tar` — submission runtime template (~731 MB)
+- `benchmark/soar/demo_sala/data.tar.gz` — speed benchmark + eval data (~8 MB)
+- `~/.fcloud_config` — must have correct `FCLOUD_URL` and `FCLOUD_TOKEN` for the target instance
+
+**What setup does** (7 steps):
+1. Check if `/root/sglang-minicpm`, `/root/submission_sim`, `/root/data` exist — skip if yes
+2. `git clone https://github.com/oldzhu/sglang-minicpm.git /root/sglang-minicpm`
+3. Upload `submission_sim.tar` to instance, extract to `/root/submission_sim`
+4. Copy all files under `/root/sglang-minicpm/python/` to `/root/submission_sim/sglang/python/`
+5. Sync `gptqmodel_minicpm_sala.py`, `preprocess_model.py`, `prepare_env.sh`, `prepare_model.sh`, `perf_public_set.jsonl` from `/root/sglang-minicpm/benchmark/soar/demo_sala/` to `/root/submission_sim/`
+6. Upload `data.tar.gz` to instance, extract to `/root/data`
+7. Sync `eval_model_001.py`, `eval_model.py` from `/root/sglang-minicpm/benchmark/soar/demo_sala/` to `/root/data/`
+
+**When all paths already exist**, setup runs an incremental sync (git pull + copy python/ + sync demo_sala files) without re-uploading tarballs.
+
+**Switching fcloud instances**: Update `~/.fcloud_config` with the new instance's URL and token before running setup or any other fcloud command.
+
+**IMPORTANT**: Always ask the user for explicit approval before running setup on any fcloud instance.
 
 ## Prioritization strategy
 

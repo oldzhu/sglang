@@ -165,6 +165,157 @@ def delete_terminal(base_url, token, name):
     return api_delete(base_url, token, f"/api/terminals/{name}")
 
 
+def shutdown_server(base_url, token):
+    """Shut down the JupyterLab server (and the fcloud instance)."""
+    body = json.dumps({}).encode()
+    req = urllib.request.Request(
+        _url_with_token(base_url, "/api/shutdown", token),
+        headers=_headers(token),
+        method="POST",
+        data=body,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:
+        # Connection reset is expected — server is shutting down
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# File upload via Contents API
+# ---------------------------------------------------------------------------
+import base64
+
+
+def _put_contents(base_url, token, api_path, content_b64):
+    """Write a file via JupyterLab Contents API (base64-encoded)."""
+    data = {"type": "file", "format": "base64", "content": content_b64}
+    body = json.dumps(data).encode()
+    req = urllib.request.Request(
+        _url_with_token(base_url, f"/api/contents/{urllib.parse.quote(api_path, safe='/')}", token),
+        headers={**_headers(token), "Content-Length": str(len(body))},
+        method="PUT",
+        data=body,
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return json.loads(resp.read())
+
+
+def _mkdir_contents(base_url, token, api_dir):
+    """Create a directory via JupyterLab Contents API (idempotent)."""
+    data = json.dumps({"type": "directory"}).encode()
+    req = urllib.request.Request(
+        _url_with_token(base_url, f"/api/contents/{urllib.parse.quote(api_dir, safe='/')}", token),
+        headers={**_headers(token), "Content-Length": str(len(data))},
+        method="PUT",
+        data=data,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return True
+    except urllib.error.HTTPError:
+        return False
+
+
+def upload_file(base_url, token, local_path, remote_path, chunk_size_mb=5):
+    """Upload a local file to fcloud instance via JupyterLab Contents API.
+
+    Splits the file into chunks, base64-encodes each, uploads via PUT,
+    then concatenates on remote.  The Contents API root maps to /workspace/
+    on the filesystem, so files are first uploaded there and then moved.
+
+    Args:
+        local_path: Local file path.
+        remote_path: Absolute remote path (e.g. /root/submission_sim.tar).
+        chunk_size_mb: Chunk size in MB for uploads.
+    """
+    file_size = os.path.getsize(local_path)
+    chunk_size = int(chunk_size_mb * 1024 * 1024)
+    num_chunks = max(1, (file_size + chunk_size - 1) // chunk_size)
+
+    # JupyterLab Contents API root → /workspace/ on the filesystem
+    ws_root = "/workspace"
+    chunk_api_dir = "_upload_chunks"
+
+    print(f"[upload] {local_path} → {remote_path} ({file_size / 1024 / 1024:.1f} MB, {num_chunks} chunks)")
+
+    if num_chunks == 1:
+        # Single file upload to root level, then move to target
+        api_name = f"_upload_{os.path.basename(remote_path)}"
+        with open(local_path, "rb") as f:
+            content_b64 = base64.b64encode(f.read()).decode("ascii")
+        _put_contents(base_url, token, api_name, content_b64)
+        # Move from /workspace/ to target
+        remote_dir = os.path.dirname(remote_path) or "/"
+        exec_command(
+            base_url, token,
+            f"mkdir -p {remote_dir} && mv {ws_root}/{api_name} {remote_path}",
+            timeout=30,
+        )
+        print(f"[upload] Done ({file_size} bytes)")
+        return True
+
+    # Chunked upload for large files
+    # Create chunk directory via Contents API (required for PUT to work)
+    _mkdir_contents(base_url, token, chunk_api_dir)
+    exec_command(base_url, token, f"rm -f {ws_root}/{chunk_api_dir}/chunk_*", timeout=30)
+
+    max_retries = 3
+    with open(local_path, "rb") as f:
+        for i in range(num_chunks):
+            chunk_data = f.read(chunk_size)
+            chunk_b64 = base64.b64encode(chunk_data).decode("ascii")
+            chunk_path = f"{chunk_api_dir}/chunk_{i:04d}"
+            for attempt in range(max_retries):
+                try:
+                    _put_contents(base_url, token, chunk_path, chunk_b64)
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        wait = 2 ** (attempt + 1)
+                        print(f"\n  [retry] Chunk {i} failed ({e}), retrying in {wait}s...")
+                        time.sleep(wait)
+                    else:
+                        print(f"\n  [ERROR] Chunk {i} failed after {max_retries} attempts: {e}")
+                        raise
+            pct = (i + 1) * 100 // num_chunks
+            print(f"  [{i + 1}/{num_chunks}] {pct}%", end="\r")
+
+    print()  # newline after progress
+
+    # Concatenate chunks on remote and move to target
+    remote_dir = os.path.dirname(remote_path) or "/"
+    _, out = exec_command(
+        base_url, token,
+        f"mkdir -p {remote_dir} && cat {ws_root}/{chunk_api_dir}/chunk_* > {remote_path} && rm -rf {ws_root}/{chunk_api_dir}",
+        timeout=300,
+    )
+
+    # Verify size
+    _, size_out = exec_command(base_url, token, f"stat -c %s {remote_path}", timeout=10)
+    try:
+        remote_size = int(size_out.strip())
+    except ValueError:
+        print(f"[upload] WARNING: Could not verify remote size: {size_out}")
+        return True
+
+    if remote_size != file_size:
+        print(f"[upload] ERROR: Size mismatch — local={file_size}, remote={remote_size}")
+        return False
+
+    print(f"[upload] Verified: {remote_size} bytes")
+    return True
+
+
+def path_exists(base_url, token, remote_path):
+    """Check if a path exists on fcloud."""
+    _, out = exec_command(base_url, token, f'test -e {remote_path} && echo EXISTS || echo MISSING', timeout=10)
+    return "EXISTS" in out
+
+
 def ws_url_for(base_url, token, terminal_name):
     ws_base = base_url.replace("http://", "ws://").replace("https://", "wss://")
     return f"{ws_base}/terminals/websocket/{terminal_name}?token={token}"
@@ -363,6 +514,9 @@ def main():
     # killall
     sub.add_parser("killall", help="Kill all terminals")
 
+    # shutdown
+    sub.add_parser("shutdown", help="Shut down the JupyterLab server")
+
     args = parser.parse_args()
     base_url, token = load_config()
 
@@ -399,6 +553,11 @@ def main():
             delete_terminal(base_url, token, t["name"])
             print(f"[fcloud] Killed terminal: {t['name']}")
         print(f"[fcloud] Killed {len(terms)} terminal(s)")
+
+    elif args.action == "shutdown":
+        print("[fcloud] Shutting down JupyterLab server...")
+        status = shutdown_server(base_url, token)
+        print(f"[fcloud] Shutdown initiated (status={status})")
 
 
 if __name__ == "__main__":

@@ -292,6 +292,215 @@ def workflow_full(base_url, token):
 
 
 # ---------------------------------------------------------------------------
+# Setup: bootstrap a clean fcloud instance
+# ---------------------------------------------------------------------------
+# Local workspace paths (relative to repo root)
+LOCAL_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+LOCAL_DEMO_SALA = os.path.join(LOCAL_REPO_ROOT, "benchmark", "soar", "demo_sala")
+
+# Files to sync from demo_sala → /root/submission_sim
+DEMO_SALA_TO_SIM = [
+    "gptqmodel_minicpm_sala.py",
+    "preprocess_model.py",
+    "prepare_env.sh",
+    "prepare_model.sh",
+    "perf_public_set.jsonl",
+]
+
+# Files to sync from demo_sala → /root/data
+DEMO_SALA_TO_DATA = [
+    "eval_model_001.py",
+    "eval_model.py",
+]
+
+
+def step_setup(base_url, token, skip_existing=True):
+    """Bootstrap a clean fcloud instance with all required files.
+
+    Steps:
+      1. Check existing paths — skip setup if already done
+      2. Git clone sglang-minicpm repo
+      3. Upload & extract submission_sim.tar → /root/submission_sim
+      4. Copy python/ from repo → submission_sim/sglang/python/
+      5. Sync demo_sala scripts → /root/submission_sim
+      6. Upload & extract data.tar.gz → /root/data
+      7. Sync eval scripts → /root/data
+    """
+    print_section("SETUP: Bootstrap fcloud instance")
+
+    # Step 1: Check existing paths
+    needs_repo = True
+    needs_sim = True
+    needs_data = True
+
+    if skip_existing:
+        needs_repo = not fcloud_exec.path_exists(base_url, token, FCLOUD_REPO)
+        needs_sim = not fcloud_exec.path_exists(base_url, token, FCLOUD_SIM)
+        needs_data = not fcloud_exec.path_exists(base_url, token, FCLOUD_DATA)
+        print(f"[setup] Needs: repo={needs_repo}, sim={needs_sim}, data={needs_data}")
+        if not needs_repo and not needs_sim and not needs_data:
+            print("[setup] All paths exist — running incremental sync only")
+            _setup_incremental_sync(base_url, token)
+            return
+
+    # Step 2: Upload repo tarball (faster than git clone on slow networks)
+    if needs_repo:
+        print("[setup] Step 2: Uploading repo tarball...")
+        # Create a minimal tarball of needed files
+        import subprocess, tempfile
+        repo_tar = os.path.join(tempfile.gettempdir(), "sglang-minicpm-repo.tar.gz")
+        print(f"  Creating tarball from {LOCAL_REPO_ROOT}...")
+        subprocess.run(
+            ["tar", "czf", repo_tar,
+             "--exclude=*.tar", "--exclude=*.tar.gz",
+             "--exclude=.git", "--exclude=test", "--exclude=docs",
+             "--exclude=3rdparty", "--exclude=sgl-kernel/benchmark",
+             "--exclude=sgl-kernel/tests",
+             "python/", "benchmark/soar/demo_sala/", "scripts/fcloud/"],
+            cwd=LOCAL_REPO_ROOT, check=True,
+        )
+        tar_size = os.path.getsize(repo_tar)
+        print(f"  Tarball size: {tar_size / 1024 / 1024:.1f} MB")
+        # Clean up any partial clone first
+        fcloud_run(base_url, token, "rm -rf /root/sglang-minicpm 2>/dev/null; true", timeout=30)
+        ok = fcloud_exec.upload_file(base_url, token, repo_tar, "/root/sglang-minicpm-repo.tar.gz")
+        if not ok:
+            print("  ERROR: Repo tarball upload failed")
+            return
+        print("[setup]   Extracting...")
+        _, out = fcloud_run(
+            base_url, token,
+            "mkdir -p /root/sglang-minicpm && cd /root/sglang-minicpm && "
+            "tar xzf /root/sglang-minicpm-repo.tar.gz && rm -f /root/sglang-minicpm-repo.tar.gz && echo OK",
+            timeout=120,
+        )
+        print(f"  {out}")
+        os.unlink(repo_tar)
+    else:
+        print("[setup] Step 2: Repo exists, syncing latest files...")
+        _setup_incremental_sync(base_url, token)
+        # Incremental sync handles steps 4-5, 7.
+        # Jump to step 6 if data dir is still needed, otherwise done.
+        if not needs_data:
+            print("[setup] All up to date")
+            return
+        # Fall through to step 6 only
+        needs_sim = False  # skip step 3 (sim already exists per step 1 check)
+
+    # Step 3: Upload & extract submission_sim.tar
+    if needs_sim:
+        print("[setup] Step 3: Uploading submission_sim.tar...")
+        sim_tar_local = os.path.join(LOCAL_DEMO_SALA, "submission_sim.tar")
+        if not os.path.isfile(sim_tar_local):
+            print(f"  ERROR: Local file not found: {sim_tar_local}")
+            print("  Please place submission_sim.tar in benchmark/soar/demo_sala/")
+            return
+        ok = fcloud_exec.upload_file(base_url, token, sim_tar_local, "/root/submission_sim.tar")
+        if not ok:
+            print("  ERROR: Upload failed")
+            return
+        print("[setup]   Extracting...")
+        _, out = fcloud_run(
+            base_url, token,
+            "cd /root && tar xf submission_sim.tar && rm -f submission_sim.tar && echo OK",
+            timeout=120,
+        )
+        print(f"  {out}")
+    else:
+        print("[setup] Step 3: submission_sim exists, skipping upload")
+
+    # Step 4: Copy python/ from repo to submission_sim/sglang/python/
+    print("[setup] Step 4: Copying python/ → submission_sim/sglang/python/...")
+    _, out = fcloud_run(
+        base_url, token,
+        f"mkdir -p {FCLOUD_SIM}/sglang/python && cp -a {FCLOUD_REPO}/python/* {FCLOUD_SIM}/sglang/python/ 2>&1 && echo OK",
+        timeout=60,
+    )
+    print(f"  {out}")
+
+    # Step 5: Sync demo_sala files → /root/submission_sim
+    print("[setup] Step 5: Syncing demo_sala scripts to submission_sim...")
+    for fname in DEMO_SALA_TO_SIM:
+        src = f"{FCLOUD_REPO}/benchmark/soar/demo_sala/{fname}"
+        dst = f"{FCLOUD_SIM}/{fname}"
+        _, out = fcloud_run(base_url, token, f"cp -v {src} {dst} 2>&1", timeout=15)
+        print(f"  {out}")
+
+    # Step 6: Upload & extract data.tar.gz
+    if needs_data:
+        print("[setup] Step 6: Uploading data.tar.gz...")
+        data_tar_local = os.path.join(LOCAL_DEMO_SALA, "data.tar.gz")
+        if not os.path.isfile(data_tar_local):
+            print(f"  ERROR: Local file not found: {data_tar_local}")
+            print("  Please place data.tar.gz in benchmark/soar/demo_sala/")
+            return
+        ok = fcloud_exec.upload_file(base_url, token, data_tar_local, "/root/data.tar.gz")
+        if not ok:
+            print("  ERROR: Upload failed")
+            return
+        print("[setup]   Extracting into /root/data/...")
+        _, out = fcloud_run(
+            base_url, token,
+            "mkdir -p /root/data && cd /root/data && tar xzf /root/data.tar.gz && rm -f /root/data.tar.gz && echo OK",
+            timeout=120,
+        )
+        print(f"  {out}")
+    else:
+        print("[setup] Step 6: data dir exists, skipping upload")
+
+    # Step 7: Sync eval scripts → /root/data
+    print("[setup] Step 7: Syncing eval scripts to /root/data...")
+    for fname in DEMO_SALA_TO_DATA:
+        src = f"{FCLOUD_REPO}/benchmark/soar/demo_sala/{fname}"
+        dst = f"{FCLOUD_DATA}/{fname}"
+        _, out = fcloud_run(base_url, token, f"cp -v {src} {dst} 2>&1", timeout=15)
+        print(f"  {out}")
+
+    print_section("SETUP COMPLETE")
+    _, out = fcloud_run(
+        base_url, token,
+        f"echo '--- Repo ---' && ls {FCLOUD_REPO}/ | head -5 && "
+        f"echo '--- Submission Sim ---' && ls {FCLOUD_SIM}/ | head -10 && "
+        f"echo '--- Data ---' && ls {FCLOUD_DATA}/",
+        timeout=15,
+    )
+    print(out)
+
+
+def _setup_incremental_sync(base_url, token):
+    """Incremental sync: pull repo, copy python/ and demo_sala files."""
+    # Pull latest
+    _, out = fcloud_run(
+        base_url, token,
+        "cd /root/sglang-minicpm && git pull --no-edit 2>&1",
+        timeout=60,
+    )
+    print(f"[sync] git pull: {out}")
+
+    # Copy python/
+    _, out = fcloud_run(
+        base_url, token,
+        f"cp -a {FCLOUD_REPO}/python/* {FCLOUD_SIM}/sglang/python/ 2>&1 && echo OK",
+        timeout=60,
+    )
+    print(f"[sync] python/ copy: {out}")
+
+    # Sync demo_sala → sim
+    for fname in DEMO_SALA_TO_SIM:
+        src = f"{FCLOUD_REPO}/benchmark/soar/demo_sala/{fname}"
+        dst = f"{FCLOUD_SIM}/{fname}"
+        fcloud_run(base_url, token, f"cp -v {src} {dst} 2>&1", timeout=15)
+
+    # Sync demo_sala → data
+    for fname in DEMO_SALA_TO_DATA:
+        src = f"{FCLOUD_REPO}/benchmark/soar/demo_sala/{fname}"
+        dst = f"{FCLOUD_DATA}/{fname}"
+        fcloud_run(base_url, token, f"cp -v {src} {dst} 2>&1", timeout=15)
+
+    print("[sync] Incremental sync complete")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 def main():
@@ -311,6 +520,9 @@ def main():
     p_logs.add_argument("--lines", type=int, default=100)
 
     sub.add_parser("shutdown", help="Shut down the fcloud instance")
+
+    p_setup = sub.add_parser("setup", help="Bootstrap a clean fcloud instance")
+    p_setup.add_argument("--force", action="store_true", help="Re-setup even if paths exist")
 
     args = parser.parse_args()
     base_url, token = fcloud_exec.load_config()
@@ -333,6 +545,8 @@ def main():
         print_section("SHUTDOWN")
         fcloud_exec.shutdown_server(base_url, token)
         print("[shutdown] fcloud instance shutdown initiated")
+    elif args.action == "setup":
+        step_setup(base_url, token, skip_existing=not args.force)
 
 
 if __name__ == "__main__":
