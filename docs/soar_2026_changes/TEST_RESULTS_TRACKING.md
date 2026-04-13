@@ -30,6 +30,9 @@ Every test run should be logged here with its configuration, commit, date, and r
 | 11 | 2026-04-10 | 9e82efe43 | 223.167.85.181 | Non-quant + FP8 KV + sparse (retest w/o 0070 bug) | 55.82% | 69.78% | 0 | 66.67% | 44.67% | 97.78% | 36.67% | 33.33% | 7379s | — | FP8 KV severely hurts NIAH/qa on non-quant; concurrency=8, ~2h eval |
 | 12 | 2026-04-12 | 9e82efe43 | 223.167.85.181 | GPTQ + FP8 KV + dense (freshly quant on old fcloud) | **79.29%** | **99.11%** | **1.0** | 63.33% | 72% | 97.78% | **100%** | 63.33% | 4244s | — | Dense mode + GPTQ + FP8; niah perfect; qa improved vs Test 9 |
 | 13 | 2026-04-12 | 9e82efe43 | 223.167.85.181 | GPTQ + bf16 KV + dense (same quant model) | 76.67% | 95.83% | 0 | 50% | 80% | 100% | 96.67% | 56.67% | 4568s | — | bf16 KV dense; mcq dropped to 50%; below C=0.8 threshold |
+| 14 | 2026-04-13 | c818ae261 | 223.167.85.181 | CHANGE_0075: bf16 RoPE + in-place residual | **52.64%** | **65.81%** | **0** | 53.33% | 47.67% | 98.89% | 36.67% | 26.67% | 4128s | — | **CATASTROPHIC**: bf16 RoPE destroys precision; qa=26.67%, niah=36.67% |
+| 15 | 2026-04-13 | b8196b71e | 223.167.85.181 | CHANGE_0075 partial: in-place residual only (RoPE restored) | **51.91%** | **64.89%** | **0** | 46.67% | 44.0% | 98.89% | 40.0% | 30.0% | 4188s | — | **CATASTROPHIC**: in-place `*=` also destroys accuracy; WORSE than Test 14 |
+| 16 | 2026-04-13 | caa93efe9 | 223.167.85.181 | Full baseline revert (no CHANGE_0075) | — | — | — | — | — | — | — | — | — | — | Running — verifying return to baseline |
 
 ---
 
@@ -44,6 +47,7 @@ Every test run should be logged here with its configuration, commit, date, and r
 | 12-VarA | 2026-04-12 | 9e82efe43 | GPTQ+FP8+dense: chunk=65K, prefill=2, running=40, mem=0.87 | 121.68s | 44.11s | 35.91s | — | Zero improvement vs baseline |
 | 12-VarB | 2026-04-12 | 9e82efe43 | GPTQ+FP8+dense: +mixed-chunk, conserv=0.7 | 121.63s | 43.70s | 35.71s | — | Marginal: S8 -1%, Smax -0.6% |
 | 12-VarC | 2026-04-12 | 9e82efe43 | GPTQ+FP8+dense: +torch.compile(max-bs=32)+mixed-chunk | **113.06s** | **41.65s** | **33.86s** | — | **Best: S1 -7.1%, S8 -5.7%, Smax -5.7%**; server OOM during accuracy eval |
+| 14-spd | 2026-04-13 | c818ae261 | CHANGE_0075: bf16 RoPE + in-place residual | 139.26s | 52.82s | **CRASH** | — | **SLOWER**: S1 +14.5%, S8 +19.6% vs baseline; Smax server crashed |
 
 ---
 

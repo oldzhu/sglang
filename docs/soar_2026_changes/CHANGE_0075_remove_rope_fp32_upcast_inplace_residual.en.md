@@ -10,7 +10,8 @@ Profiling the MiniCPM-SALA model forward pass revealed two sources of unnecessar
 
 ## Rule-Compliance Statement
 
-- **No accuracy risk**: RoPE kernel already operates correctly in bf16; in-place multiply is mathematically identical.
+- ~~**No accuracy risk**: RoPE kernel already operates correctly in bf16; in-place multiply is mathematically identical.~~
+- **ACCURACY RISK CONFIRMED**: Both changes cause catastrophic accuracy regression. See results below.
 - **No submission constraint impact**: No model size change, no additional dependencies.
 - **Reproducible**: Standard code optimization, fully deterministic.
 
@@ -71,22 +72,61 @@ python3 scripts/fcloud/fcloud_workflow.py speed --variant all
 
 ## Result Summary
 
-| Metric | Baseline | After CHANGE_0075 | Delta |
-|--------|----------|--------------------|-------|
-| S1 | TBD | TBD | TBD |
-| S8 | TBD | TBD | TBD |
-| Smax | TBD | TBD | TBD |
-| Accuracy | TBD | TBD | TBD |
+**STATUS: REVERTED — Both changes cause catastrophic accuracy regression.**
+
+### Test 14: Both changes (bf16 RoPE + in-place residual) — commit c818ae261
+
+| Metric | Baseline (Test 12) | After CHANGE_0075 | Delta |
+|--------|--------------------|--------------------|-------|
+| S1 | 121.66s | 139.26s | **+14.5% slower** |
+| S8 | 44.17s | 52.82s | **+19.6% slower** |
+| Smax | 35.91s | CRASH (server died) | **FATAL** |
+| ori_accuracy | 79.29% | **52.64%** | **-26.65pp** |
+| normalized | 99.11% | **65.81%** | **-33.3pp** |
+| C | 1.0 | **0 (eliminated)** | — |
+
+Task-level accuracy collapse:
+- cwe: 47.67% (baseline ~72%)
+- fwe: 98.89% (OK — unaffected)
+- mcq: 53.33% (baseline ~63%)
+- niah: 36.67% (baseline ~100%)
+- qa: 26.67% (baseline ~63%)
+
+### Test 15: In-place residual only (RoPE restored) — commit b8196b71e
+
+| Metric | Baseline (Test 12) | In-place residual only | Delta |
+|--------|--------------------|-----------------------|-------|
+| ori_accuracy | 79.29% | **51.91%** | **-27.38pp** |
+| normalized | 99.11% | **64.89%** | **-34.22pp** |
+| C | 1.0 | **0 (eliminated)** | — |
+
+**Even worse than Test 14** — the in-place `*=` alone causes massive regression.
+
+### Root Cause Analysis
+
+1. **bf16 RoPE**: Although the sgl-kernel CUDA kernel technically accepts bf16 inputs and uses float32 internally for cos/sin cache values, the multiplication `q*cos + rotate(q)*sin` happens in bf16 precision when bf16 tensors are passed. MiniCPM-SALA relies on float32 precision for this computation — the float32 upcast is NOT defensive, it is REQUIRED.
+
+2. **In-place residual scale**: The `hidden_states *= scalar` vs `hidden_states = hidden_states * scalar` behaves differently under sglang's CUDA graph capture. In-place modification of pre-allocated tensors in the CUDA graph can corrupt tensor aliasing and buffer reuse, leading to cascading numerical errors across layers. This is NOT simply a mathematical equivalence — the memory management semantics differ.
+
+3. **Speed regression**: The broken accuracy caused the model to generate longer/incorrect outputs, artificially inflating the benchmark duration. There is no genuine speed benefit from either change.
 
 ## Rollback Instructions
 
-Revert the three code changes:
-1. Restore float32 upcast in `MiniCPMAttention.forward()`
-2. Restore float32 upcast in `MiniCPMLightningMixer._apply_qk_norm_rope()` non-fused path
-3. Restore `hidden_states = hidden_states * self.residual_scale` (2 occurrences in `MiniCPMDecoderLayer.forward()`)
+All changes have been **fully reverted** in commit caa93efe9:
+1. Float32 upcast restored in `MiniCPMAttention.forward()` — REQUIRED for accuracy
+2. Float32 upcast restored in `MiniCPMLightningMixer._apply_qk_norm_rope()` — REQUIRED for accuracy
+3. `hidden_states = hidden_states * self.residual_scale` restored (2 occurrences) — REQUIRED for CUDA graph correctness
+
+## Lessons Learned
+
+1. **Never assume kernel-level dtype support implies model-level correctness.** The bf16 RoPE kernel works correctly at the kernel level, but the model was trained with float32 RoPE computations. Removing the upcast introduces systematic numerical drift that compounds across 32 layers.
+
+2. **In-place tensor operations are NOT safe under CUDA graphs.** sglang's CUDA graph capture pre-allocates tensor buffers and fixes memory addresses. In-place `*=` modifies these buffers directly, which can corrupt aliased references. Always create new tensors in the forward pass when CUDA graphs are active.
+
+3. **"Mathematically identical" does not mean "computationally identical."** Both changes appeared safe on paper but failed catastrophically in practice due to precision and memory management differences in the GPU execution model.
 
 ## Next Steps
 
-- Test on fcloud with GPTQ+FP8+dense config to measure actual speed improvement
-- If stable, combine with `--enable-torch-compile` for compound gains
-- Consider folding `residual_scale` into `o_proj`/`down_proj` weights at load time for zero-cost scaling (higher complexity, deferred)
+- **Do NOT retry** either optimization without extensive precision analysis
+- Focus on other optimization vectors: torch.compile, scheduling tuning, kernel fusion
+- Consider folding `residual_scale` into weights at load time (avoids runtime computation entirely) — but verify with accuracy test first
