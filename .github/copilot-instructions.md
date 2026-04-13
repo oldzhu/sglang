@@ -87,6 +87,15 @@ S_N = (Duration_best / Duration_player) × 100
 - Respect fixed concurrency evaluation settings (`--flush-cache`, fixed `--max-concurrent`).
 - Keep submission package constraints in mind (≤ 2GB, on-site quantization, ≤ 5h total).
 
+## Baseline config (must enforce)
+
+- The **current best config** is: **GPTQ (sparse_qkv_w8) + FP8 KV cache + dense mode** (`--force-dense-minicpm --kv-cache-dtype fp8_e5m2`).
+- All optimization work and accuracy/speed testing **MUST** use this config unless:
+  1. We have exhausted all improvement avenues on this config, AND
+  2. We explicitly decide to try an alternative config with documented rationale.
+- **Never** test optimizations on GPTQ + sparse mode — it gives ~50% accuracy on the old fcloud instance and is not the submission config.
+- The baseline reference results (Test 12): S1=121.71s, S8=44.09s, Smax=35.86s, ori_accuracy=79.29%, normalized=99.11%, C=1.0.
+
 ## Server launch rule (must enforce)
 
 - **All sglang server args must be defined in `prepare_env.sh` via `SGLANG_SERVER_ARGS`**, not hardcoded in launch commands.
