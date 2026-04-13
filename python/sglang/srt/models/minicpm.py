@@ -638,14 +638,14 @@ class MiniCPMDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             forward_batch=forward_batch,
         )
-        hidden_states *= self.residual_scale
+        hidden_states = hidden_states * self.residual_scale
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual
         )
         hidden_states = self.mlp(hidden_states)
-        hidden_states *= self.residual_scale
+        hidden_states = hidden_states * self.residual_scale
 
         return hidden_states, residual
 
