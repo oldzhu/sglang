@@ -87,6 +87,22 @@ S_N = (Duration_best / Duration_player) × 100
 - Respect fixed concurrency evaluation settings (`--flush-cache`, fixed `--max-concurrent`).
 - Keep submission package constraints in mind (≤ 2GB, on-site quantization, ≤ 5h total).
 
+## Server launch rule (must enforce)
+
+- **All sglang server args must be defined in `prepare_env.sh` via `SGLANG_SERVER_ARGS`**, not hardcoded in launch commands.
+- To tune or add server args, **modify `benchmark/soar/demo_sala/prepare_env.sh`** and then start sglang using:
+  ```bash
+  source ./prepare_env.sh
+  python3 -m sglang.launch_server \
+    --model-path "$MODEL_PATH" \
+    --host "$HOST" \
+    --port "$PORT" \
+    "${SGLANG_SERVER_ARGS[@]}"
+  ```
+- This is required because official evaluation launches sglang using the exported `SGLANG_SERVER_ARGS` from `prepare_env.sh`.
+- **Never** pass server args directly in the launch command bypassing `SGLANG_SERVER_ARGS`.
+- The `fcloud_workflow.py restart-server` command already follows this pattern.
+
 ## Rule freshness requirement (must enforce)
 
 - Whenever optimization/compliance decisions depend on competition rules, re-check the latest official pages first:
