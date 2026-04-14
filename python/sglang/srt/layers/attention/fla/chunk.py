@@ -7,7 +7,10 @@ from typing import Optional
 import torch
 from einops import rearrange
 
-from sglang.srt.layers.attention.fla.chunk_delta_h import chunk_gated_delta_rule_fwd_h
+from sglang.srt.layers.attention.fla.chunk_delta_h import (
+    CHUNK_SIZE,
+    chunk_gated_delta_rule_fwd_h,
+)
 from sglang.srt.layers.attention.fla.chunk_o import chunk_fwd_o
 from sglang.srt.layers.attention.fla.chunk_scaled_dot_kkt import (
     chunk_scaled_dot_kkt_fwd,
@@ -34,10 +37,10 @@ def chunk_gated_delta_rule_fwd(
     initial_state_indices: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
+    g = chunk_local_cumsum(g, chunk_size=CHUNK_SIZE, cu_seqlens=cu_seqlens)
     # obtain WY representation. u is actually the new v.
     A = chunk_scaled_dot_kkt_fwd(
-        k=k, beta=beta, g_cumsum=g, cu_seqlens=cu_seqlens, output_dtype=torch.float32
+        k=k, beta=beta, g_cumsum=g, cu_seqlens=cu_seqlens, chunk_size=CHUNK_SIZE, output_dtype=torch.float32
     )
     A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
     w, u = recompute_w_u_fwd(
@@ -65,6 +68,7 @@ def chunk_gated_delta_rule_fwd(
         g=g,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_size=CHUNK_SIZE,
     )
     if SUPPRESS_LEVEL < 3:
         return g, o, A, None, h, None

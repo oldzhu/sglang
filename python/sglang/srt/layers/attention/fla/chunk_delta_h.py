@@ -4,6 +4,8 @@
 
 from typing import Optional, Tuple
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -16,7 +18,7 @@ from sglang.srt.layers.attention.fla.op import exp, safe_exp
 from sglang.srt.layers.attention.fla.utils import is_nvidia_hopper
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
-CHUNK_SIZE = 64
+CHUNK_SIZE = int(os.environ.get("SGLANG_FLA_CHUNK_SIZE", "64"))
 
 
 # @triton.autotune(
