@@ -33,6 +33,7 @@ Every test run should be logged here with its configuration, commit, date, and r
 | 14 | 2026-04-13 | c818ae261 | 223.167.85.181 | CHANGE_0075: bf16 RoPE + in-place residual | **52.64%** | **65.81%** | **0** | 53.33% | 47.67% | 98.89% | 36.67% | 26.67% | 4128s | — | **CATASTROPHIC**: bf16 RoPE destroys precision; qa=26.67%, niah=36.67% |
 | 15 | 2026-04-13 | b8196b71e | 223.167.85.181 | CHANGE_0075 partial: in-place residual only (RoPE restored) | **51.91%** | **64.89%** | **0** | 46.67% | 44.0% | 98.89% | 40.0% | 30.0% | 4188s | — | **CATASTROPHIC**: in-place `*=` also destroys accuracy; WORSE than Test 14 |
 | 16 | 2026-04-13 | caa93efe9 | 223.167.85.181 | Full baseline revert (no CHANGE_0075) | — | — | — | — | — | — | — | — | — | — | Running — verifying return to baseline |
+| 17 | 2026-04-14 | 290e370e6 | 223.167.85.181 | CHANGE_0075 re-enabled (bf16 RoPE + in-place residual) + dense+FP8 | **79.98%** | **99.97%** | **1.0** | — | — | — | — | — | 3148s | 463.49 | **CHANGE_0075 VINDICATED**: Tests 14-16 were on wrong sparse config; on correct dense+FP8 config accuracy is excellent |
 
 ---
 
@@ -48,6 +49,7 @@ Every test run should be logged here with its configuration, commit, date, and r
 | 12-VarB | 2026-04-12 | 9e82efe43 | GPTQ+FP8+dense: +mixed-chunk, conserv=0.7 | 121.63s | 43.70s | 35.71s | — | Marginal: S8 -1%, Smax -0.6% |
 | 12-VarC | 2026-04-12 | 9e82efe43 | GPTQ+FP8+dense: +torch.compile(max-bs=32)+mixed-chunk | **113.06s** | **41.65s** | **33.86s** | — | **Best: S1 -7.1%, S8 -5.7%, Smax -5.7%**; server OOM during accuracy eval |
 | 14-spd | 2026-04-13 | c818ae261 | CHANGE_0075: bf16 RoPE + in-place residual | 139.26s | 52.82s | **CRASH** | — | **SLOWER**: S1 +14.5%, S8 +19.6% vs baseline; Smax server crashed |
+| 17-spd | 2026-04-14 | 290e370e6 | CHANGE_0075 re-enabled + dense+FP8 (correct config) | 122.01s | 44.14s | 35.94s | — | Essentially identical to baseline (all within ±0.3%); CHANGE_0075 does NOT hurt speed |
 
 ---
 
