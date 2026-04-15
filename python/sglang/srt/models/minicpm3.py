@@ -14,7 +14,7 @@
 """Inference-only MiniCPM3 model compatible with HuggingFace weights."""
 
 import math
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -37,6 +37,7 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from sglang.srt.distributed import get_pp_group
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix, is_cuda
@@ -371,6 +372,7 @@ class MiniCPM3Model(nn.Module):
             ]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.layers_to_capture = []
 
     def forward(
         self,
@@ -385,8 +387,11 @@ class MiniCPM3Model(nn.Module):
             hidden_states = input_embeds
         residual = None
 
+        aux_hidden_states = []
         for i in range(len(self.layers)):
             layer = self.layers[i]
+            if i in self.layers_to_capture:
+                aux_hidden_states.append(hidden_states)
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -394,7 +399,9 @@ class MiniCPM3Model(nn.Module):
                 residual,
             )
         hidden_states = self.norm(hidden_states)
-        return hidden_states
+        if len(aux_hidden_states) == 0:
+            return hidden_states
+        return hidden_states, aux_hidden_states
 
 
 class MiniCPM3ForCausalLM(nn.Module):
@@ -406,6 +413,7 @@ class MiniCPM3ForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        self.pp_group = get_pp_group()
 
         self.num_experts = getattr(self.config, "num_experts", 0)
         self.quant_config = quant_config
@@ -424,6 +432,7 @@ class MiniCPM3ForCausalLM(nn.Module):
         self.scale_width = self.config.hidden_size / self.config.dim_model_base
 
         self.logits_processor = LogitsProcessor(config)
+        self.capture_aux_hidden_states = False
 
     @torch.no_grad()
     def forward(
@@ -436,12 +445,47 @@ class MiniCPM3ForCausalLM(nn.Module):
         if input_embeds is not None:
             input_embeds = input_embeds * self.config.scale_emb
         hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
+
+        aux_hidden_states = None
+        if self.capture_aux_hidden_states:
+            hidden_states, aux_hidden_states = hidden_states
+
         hidden_states = hidden_states / self.scale_width
         if self.config.tie_word_embeddings:
             lm_head = self.model.embed_tokens
         else:
             lm_head = self.lm_head
-        return self.logits_processor(input_ids, hidden_states, lm_head, forward_batch)
+        return self.logits_processor(
+            input_ids, hidden_states, lm_head, forward_batch, aux_hidden_states
+        )
+
+    def get_embed_and_head(self):
+        return self.model.embed_tokens, self.lm_head
+
+    def set_embed_and_head(self, embed, head):
+        del self.model.embed_tokens.weight
+        self.model.embed_tokens.weight = embed
+        if head is not None:
+            del self.lm_head.weight
+            self.lm_head.weight = head
+
+    def set_embed(self, embed):
+        del self.model.embed_tokens.weight
+        self.model.embed_tokens.weight = embed
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+    def set_eagle3_layers_to_capture(self, layer_ids: Optional[List[int]] = None):
+        if not self.pp_group.is_last_rank:
+            return
+
+        if layer_ids is None:
+            self.capture_aux_hidden_states = True
+            num_layers = self.config.num_hidden_layers
+            self.model.layers_to_capture = [2, num_layers // 2, num_layers - 3]
+        else:
+            self.capture_aux_hidden_states = True
+            self.model.layers_to_capture = [val + 1 for val in layer_ids]
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [

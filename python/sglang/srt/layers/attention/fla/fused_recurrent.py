@@ -375,6 +375,7 @@ def fused_recurrent_gated_delta_rule_update_fwd_kernel(
     DISABLE_OUTPUT_CALCULATION: tl.constexpr,  # whether to disable output calculation
     CACHE_INTERMEDIATE_STATES: tl.constexpr,
     HAS_EAGLE_TREE_CUSTOM_ATTN_MASK: tl.constexpr,
+    SKIP_DELTA_RULE: tl.constexpr,  # SimpleGLA mode: skip v -= k^T*h subtraction
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -465,13 +466,14 @@ def fused_recurrent_gated_delta_rule_update_fwd_kernel(
         b_q = b_q * scale
         # [BK, BV]
         b_h *= exp(b_g)
-        # [BV]
-        b_v -= tl.sum(b_h * b_k[:, None], 0)
-        if IS_BETA_HEADWISE:
-            b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
-        else:
-            b_beta = tl.load(p_beta).to(tl.float32)
-        b_v *= b_beta
+        if not SKIP_DELTA_RULE:
+            # GDR delta rule: v -= k^T @ h (skipped for SimpleGLA)
+            b_v -= tl.sum(b_h * b_k[:, None], 0)
+            if IS_BETA_HEADWISE:
+                b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
+            else:
+                b_beta = tl.load(p_beta).to(tl.float32)
+            b_v *= b_beta
         # [BK, BV]
         b_h += b_k[:, None] * b_v[None, :]
         # [BV]
@@ -536,6 +538,7 @@ def fused_recurrent_gated_delta_rule_update_fwd(
     intermediate_state_indices: Optional[torch.Tensor] = None,
     cache_steps: Optional[int] = None,
     retrieve_parent_token: Optional[torch.Tensor] = None,
+    skip_delta_rule: bool = False,
 ) -> torch.Tensor:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -598,6 +601,7 @@ def fused_recurrent_gated_delta_rule_update_fwd(
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         DISABLE_STATE_UPDATE=disable_state_update,
         DISABLE_OUTPUT_CALCULATION=disable_output_calculation,
+        SKIP_DELTA_RULE=skip_delta_rule,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -627,6 +631,7 @@ class FusedRecurrentUpdateFunction(torch.autograd.Function):
         intermediate_state_indices: Optional[torch.Tensor] = None,
         cache_steps: Optional[int] = None,
         retrieve_parent_token: Optional[torch.Tensor] = None,
+        skip_delta_rule: bool = False,
     ):
         o = fused_recurrent_gated_delta_rule_update_fwd(
             q=q,
@@ -645,6 +650,7 @@ class FusedRecurrentUpdateFunction(torch.autograd.Function):
             intermediate_state_indices=intermediate_state_indices,
             cache_steps=cache_steps,
             retrieve_parent_token=retrieve_parent_token,
+            skip_delta_rule=skip_delta_rule,
         )
 
         return o
@@ -676,6 +682,7 @@ def fused_recurrent_gated_delta_rule_update(
     intermediate_state_indices: Optional[torch.Tensor] = None,
     cache_steps: Optional[int] = None,
     retrieve_parent_token: Optional[torch.Tensor] = None,
+    skip_delta_rule: bool = False,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
         if q.shape[0] != 1:
@@ -717,5 +724,6 @@ def fused_recurrent_gated_delta_rule_update(
         intermediate_state_indices,
         cache_steps,
         retrieve_parent_token,
+        skip_delta_rule,
     )
     return o

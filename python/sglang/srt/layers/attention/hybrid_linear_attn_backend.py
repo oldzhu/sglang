@@ -206,6 +206,42 @@ def track_mamba_states_if_needed(
     )
 
 
+def _compute_retrieve_parent_token(
+    retrieve_next_token: torch.Tensor,
+    retrieve_next_sibling: torch.Tensor,
+) -> torch.Tensor:
+    """Compute parent token indices from next_token and next_sibling tensors.
+
+    This replicates the computation fused inside causal_conv1d_update for models
+    that have no conv1d layers (e.g. SimpleGLA-only). For each token processed in
+    order: (1) the child's parent is set to the current token, (2) the sibling's
+    parent is set to the current token's parent.
+
+    Args:
+        retrieve_next_token: (batch, draft_tokens) next-token indices, -1 = invalid
+        retrieve_next_sibling: (batch, draft_tokens) next-sibling indices, -1 = invalid
+
+    Returns:
+        retrieve_parent_token: (batch, draft_tokens) parent indices
+    """
+    device = retrieve_next_token.device
+    nt_cpu = retrieve_next_token.to("cpu", non_blocking=False)
+    ns_cpu = retrieve_next_sibling.to("cpu", non_blocking=False)
+    batch_size, seq_len = nt_cpu.shape
+    parent = torch.zeros_like(nt_cpu)
+
+    for b in range(batch_size):
+        for i in range(seq_len):
+            next_tok = nt_cpu[b, i].item()
+            if 0 <= next_tok < seq_len:
+                parent[b, next_tok] = i
+            next_sib = ns_cpu[b, i].item()
+            if 0 <= next_sib < seq_len:
+                parent[b, next_sib] = parent[b, i].item()
+
+    return parent.to(device, non_blocking=False)
+
+
 class MambaAttnBackendBase(AttentionBackend):
     def __init__(self, model_runner: ModelRunner):
         super().__init__()
@@ -257,7 +293,9 @@ class MambaAttnBackendBase(AttentionBackend):
                     retrieve_next_sibling = forward_batch.spec_info.retrive_next_sibling
                     # retrieve_next_token is None during dummy run so skip tensor creation
                     if retrieve_next_token is not None:
-                        retrieve_parent_token = torch.empty_like(retrieve_next_token)
+                        retrieve_parent_token = _compute_retrieve_parent_token(
+                            retrieve_next_token, retrieve_next_sibling
+                        )
             else:
                 query_start_loc = torch.empty(
                     (bs + 1,), dtype=torch.int32, device=self.device
@@ -1392,10 +1430,12 @@ class HybridLinearAttnBackend(AttentionBackend):
             self.linear_attn_backend.req_to_token_pool.get_speculative_mamba2_params_all_layers()
         )
 
-        conv_states = mamba_caches.conv[0]
+        has_conv = bool(mamba_caches.conv)
+        if has_conv:
+            conv_states = mamba_caches.conv[0]
+            intermediate_conv_window_cache = mamba_caches.intermediate_conv_window[0]
         ssm_states = mamba_caches.temporal
         intermediate_state_cache = mamba_caches.intermediate_ssm
-        intermediate_conv_window_cache = mamba_caches.intermediate_conv_window[0]
 
         # Compute common indices once to avoid duplication
         valid_mask = accepted_steps >= 0
@@ -1410,10 +1450,11 @@ class HybridLinearAttnBackend(AttentionBackend):
             :, src_state_indices, last_steps
         ].to(ssm_states.dtype, copy=False)
 
-        # Scatter into conv_states at the chosen cache lines
-        conv_states[:, dst_state_indices, :] = intermediate_conv_window_cache[
-            :, src_state_indices, last_steps
-        ].to(conv_states.dtype, copy=False)
+        # Scatter into conv_states at the chosen cache lines (only if conv layers exist)
+        if has_conv:
+            conv_states[:, dst_state_indices, :] = intermediate_conv_window_cache[
+                :, src_state_indices, last_steps
+            ].to(conv_states.dtype, copy=False)
 
         # Track indices used for tracking mamba states for prefix cache
         if mamba_track_indices is not None:
@@ -1431,10 +1472,11 @@ class HybridLinearAttnBackend(AttentionBackend):
                 :, src_track_indices, track_steps
             ].to(ssm_states.dtype, copy=False)
 
-            # scatter into conv_states at the chosen track states
-            conv_states[:, dst_track_indices, :] = intermediate_conv_window_cache[
-                :, src_track_indices, track_steps
-            ].to(conv_states.dtype, copy=False)
+            # scatter into conv_states at the chosen track states (only if conv layers exist)
+            if has_conv:
+                conv_states[:, dst_track_indices, :] = intermediate_conv_window_cache[
+                    :, src_track_indices, track_steps
+                ].to(conv_states.dtype, copy=False)
 
 
 class SimpleGLAAttnBackend(MambaAttnBackendBase):
@@ -1642,38 +1684,86 @@ class SimpleGLAAttnBackend(MambaAttnBackendBase):
         head_dim = q.shape[3]
         mamba_indices = self._get_mamba_indices(forward_batch)
         layer_cache = self._get_layer_cache(layer_id)
-        initial_state = None
-        if forward_batch.forward_mode.is_decode() or self._has_prefix_state(
-            forward_batch
-        ):
-            initial_state = self._load_initial_state(layer_cache, mamba_indices)
 
-        mode = self._select_mode(forward_batch)
-        if forward_batch.forward_mode.is_decode() or mode == "fused_recurrent":
-            o, final_state = fused_recurrent_simple_gla(
+        is_target_verify = forward_batch.forward_mode.is_target_verify()
+
+        if is_target_verify:
+            # Tree verify mode: use GDR update kernel with skip_delta_rule=True
+            # to reuse its tree-verify infrastructure (intermediate state caching,
+            # parent-token state loading, disable_state_update).
+            seq_len = q.shape[1]
+            forward_metadata = self.forward_metadata
+
+            assert isinstance(layer_cache, MambaPool.SpeculativeState)
+            intermediate_state_cache = layer_cache.intermediate_ssm
+            ssm_states = layer_cache.temporal
+
+            cache_indices = forward_metadata.mamba_cache_indices
+            retrieve_parent_token = forward_metadata.retrieve_parent_token
+
+            batch_size = seq_len // forward_batch.spec_info.draft_token_num
+            intermediate_state_indices = torch.arange(
+                cache_indices.shape[0],
+                dtype=torch.int32,
+                device=cache_indices.device,
+            )
+
+            # Expand per-head slope g_gamma to (1, seq_len, num_heads) for kernel
+            g = self.g_gamma.view(1, 1, num_heads).expand(
+                1, seq_len, -1
+            ).contiguous()
+
+            o = fused_recurrent_gated_delta_rule_update(
                 q=q,
                 k=k,
                 v=v,
-                g_gamma=self.g_gamma,
+                g=g,
+                beta=None,  # unused with skip_delta_rule=True
                 scale=self.scale,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=self.forward_metadata.query_start_loc,
+                initial_state_source=ssm_states,
+                initial_state_indices=cache_indices[:batch_size],
+                cu_seqlens=forward_metadata.query_start_loc,
+                use_qk_l2norm_in_kernel=False,
+                disable_state_update=True,
+                intermediate_states_buffer=intermediate_state_cache,
+                intermediate_state_indices=intermediate_state_indices[:batch_size],
+                cache_steps=forward_batch.spec_info.draft_token_num,
+                retrieve_parent_token=retrieve_parent_token,
+                skip_delta_rule=True,
             )
         else:
-            o, final_state = chunk_simple_gla(
-                q=q,
-                k=k,
-                v=v,
-                g_gamma=self.g_gamma,
-                initial_state=initial_state,
-                output_final_state=True,
-                scale=self.scale,
-                cu_seqlens=self.forward_metadata.query_start_loc,
-            )
+            initial_state = None
+            if forward_batch.forward_mode.is_decode() or self._has_prefix_state(
+                forward_batch
+            ):
+                initial_state = self._load_initial_state(layer_cache, mamba_indices)
 
-        if final_state is not None:
-            self._store_final_state(layer_cache, mamba_indices, final_state)
+            mode = self._select_mode(forward_batch)
+            if forward_batch.forward_mode.is_decode() or mode == "fused_recurrent":
+                o, final_state = fused_recurrent_simple_gla(
+                    q=q,
+                    k=k,
+                    v=v,
+                    g_gamma=self.g_gamma,
+                    scale=self.scale,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=self.forward_metadata.query_start_loc,
+                )
+            else:
+                o, final_state = chunk_simple_gla(
+                    q=q,
+                    k=k,
+                    v=v,
+                    g_gamma=self.g_gamma,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    scale=self.scale,
+                    cu_seqlens=self.forward_metadata.query_start_loc,
+                )
+
+            if final_state is not None:
+                self._store_final_state(layer_cache, mamba_indices, final_state)
 
         o = o.reshape(-1, num_heads * head_dim)
 
