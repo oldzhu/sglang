@@ -34,6 +34,9 @@ Every test run should be logged here with its configuration, commit, date, and r
 | 15 | 2026-04-13 | b8196b71e | 223.167.85.181 | CHANGE_0075 partial: in-place residual only (RoPE restored) | **51.91%** | **64.89%** | **0** | 46.67% | 44.0% | 98.89% | 40.0% | 30.0% | 4188s | — | **CATASTROPHIC**: in-place `*=` also destroys accuracy; WORSE than Test 14 |
 | 16 | 2026-04-13 | caa93efe9 | 223.167.85.181 | Full baseline revert (no CHANGE_0075) | — | — | — | — | — | — | — | — | — | — | Running — verifying return to baseline |
 | 17 | 2026-04-14 | 290e370e6 | 223.167.85.181 | CHANGE_0075 re-enabled (bf16 RoPE + in-place residual) + dense+FP8 | **79.98%** | **99.97%** | **1.0** | — | — | — | — | — | 3148s | 463.49 | **CHANGE_0075 VINDICATED**: Tests 14-16 were on wrong sparse config; on correct dense+FP8 config accuracy is excellent |
+| 18 | 2026-04-14 | a9f4d43cb | 223.167.85.181 | torch.compile (max-bs=8) + CHANGE_0075 + dense+FP8 | 78.18% | ~97.7% | 0.92 | 50.00% | 78.67% | 98.89% | 100% | 63.33% | 3268s | 496.27 | **mcq dropped to 50%** (from 63%); torch.compile may be causing MCQ regression; C drops from 1.0→0.92; net negative |
+| 18b | 2026-04-14 | a9f4d43cb | 223.167.85.181 | torch.compile (max-bs=8) re-run | **79.38%** | **99.22%** | **1.0** | 63.33% | 74.67% | 98.89% | 100% | 60.00% | — | 523.00 | **mcq recovered to 63.33%**; Test 18 mcq=50% was variance; C=1.0 restored; torch.compile is SAFE |
+| 20 | 2026-04-15 | 9f9b02c52 | 223.167.85.181 | CHANGE_0085: mixed-chunk + max-running-requests=24 | **80.64%** | **100.80%** | **1.0** | 63.33% | 77.67% | 98.89% | 100% | 63.33% | 3171s | 501.00 | Accuracy improved; C=1.0 maintained; config also includes torch.compile(max-bs=8) |
 
 ---
 
@@ -50,6 +53,13 @@ Every test run should be logged here with its configuration, commit, date, and r
 | 12-VarC | 2026-04-12 | 9e82efe43 | GPTQ+FP8+dense: +torch.compile(max-bs=32)+mixed-chunk | **113.06s** | **41.65s** | **33.86s** | — | **Best: S1 -7.1%, S8 -5.7%, Smax -5.7%**; server OOM during accuracy eval |
 | 14-spd | 2026-04-13 | c818ae261 | CHANGE_0075: bf16 RoPE + in-place residual | 139.26s | 52.82s | **CRASH** | — | **SLOWER**: S1 +14.5%, S8 +19.6% vs baseline; Smax server crashed |
 | 17-spd | 2026-04-14 | 290e370e6 | CHANGE_0075 re-enabled + dense+FP8 (correct config) | 122.01s | 44.14s | 35.94s | — | Essentially identical to baseline (all within ±0.3%); CHANGE_0075 does NOT hurt speed |
+| 18-spd | 2026-04-14 | a9f4d43cb | torch.compile (max-bs=8) + dense+FP8 | **112.97s** | **41.23s** | **35.41s** | — | **S1 -7.4%, S8 -6.6%, Smax -1.5%** vs Test 17; good speed gain but accuracy dropped (C=0.92), net negative |
+| 19-spd | 2026-04-15 | 23d1c8ecf | CHANGE_0080: FLA chunk/threshold tuning sweep | 112.96s | 41.55s | 35.56s | — | Baseline (chunk=64,thresh=128). All variants tested below — **zero impact** |
+| 19-A | 2026-04-15 | 23d1c8ecf | chunk_size=32, threshold=128 | 113.02s | — | — | — | No change vs baseline |
+| 19-B | 2026-04-15 | 23d1c8ecf | chunk_size=128, threshold=128 | 112.97s | — | — | — | No change vs baseline |
+| 19-C | 2026-04-15 | 23d1c8ecf | chunk_size=64, threshold=64 | 112.95s | — | — | — | No change vs baseline |
+| 19-D | 2026-04-15 | 23d1c8ecf | chunk_size=64, threshold=256 | 112.97s | 41.54s | — | — | No change vs baseline |
+| 20-spd | 2026-04-15 | 9f9b02c52 | CHANGE_0085: mixed-chunk + max-running-req=24 + torch.compile(max-bs=8) | **113.67s** | **41.07s** | **34.15s** | — | S1 ~same, S8 -1.2%, **Smax -4.0%** vs Test 19; mixed-chunk helps Smax most |
 
 ---
 
