@@ -100,6 +100,10 @@ class DraftAttention(nn.Module):
         sin = sin.unsqueeze(1)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
+        # Ensure consistent dtype after rotary (which may upcast to float32)
+        dtype = v.dtype
+        q, k = q.to(dtype), k.to(dtype)
+
         # GQA: expand kv heads
         if self.num_kv_heads < self.num_heads:
             rep = self.num_heads // self.num_kv_heads

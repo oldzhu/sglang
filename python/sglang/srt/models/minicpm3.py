@@ -460,7 +460,7 @@ class MiniCPM3ForCausalLM(nn.Module):
         )
 
     def get_embed_and_head(self):
-        return self.model.embed_tokens, self.lm_head
+        return self.model.embed_tokens.weight, self.lm_head.weight
 
     def set_embed_and_head(self, embed, head):
         del self.model.embed_tokens.weight
