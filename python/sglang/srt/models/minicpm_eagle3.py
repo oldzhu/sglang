@@ -132,10 +132,12 @@ class MiniCPMEagle3Attention(nn.Module):
             rope_scaling=rope_scaling,
         )
 
+        self.scaling = self.head_dim**-0.5
+
         self.attn = RadixAttention(
             self.num_heads,
             self.head_dim,
-            self.rotary_emb,
+            self.scaling,
             num_kv_heads=self.num_kv_heads,
             layer_id=layer_id,
             prefix=add_prefix("attn", prefix),
