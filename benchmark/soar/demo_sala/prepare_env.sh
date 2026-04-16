@@ -131,7 +131,16 @@ if [[ "$QUANT_MODE" == "gptq" ]]; then
 	if [[ "$SOAR_ENABLE_FUSED_QK_NORM_ROPE" == "1" || "$SOAR_ENABLE_FUSED_QK_NORM_ROPE" == "true" || "$SOAR_ENABLE_FUSED_QK_NORM_ROPE" == "TRUE" ]]; then
 		FUSED_QK_NORM_ROPE_ARG=" --enable-fused-qk-norm-rope"
 	fi
-	export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --trust-remote-code --disable-radix-cache --attention-backend minicpm_flashinfer --chunked-prefill-size 32768 --max-prefill-tokens 32768 --prefill-max-requests 1 --max-running-requests 24 --mem-fraction-static 0.84 --schedule-conservativeness 1.0 --dense-as-sparse --quantization gptq_marlin --force-dense-minicpm --kv-cache-dtype fp8_e5m2${FUSED_QK_NORM_ROPE_ARG} --enable-torch-compile --torch-compile-max-bs 8 --enable-mixed-chunk"
+
+	# EAGLE3 speculative decoding args
+	EAGLE3_ARGS=""
+	SOAR_ENABLE_EAGLE3="${SOAR_ENABLE_EAGLE3:-1}"
+	SOAR_EAGLE3_DRAFT_MODEL_PATH="${SOAR_EAGLE3_DRAFT_MODEL_PATH:-/root/models/eagle3_draft_minicpm}"
+	if [[ "$SOAR_ENABLE_EAGLE3" == "1" || "$SOAR_ENABLE_EAGLE3" == "true" ]]; then
+		EAGLE3_ARGS=" --speculative-algorithm EAGLE3 --speculative-draft-model-path ${SOAR_EAGLE3_DRAFT_MODEL_PATH} --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --speculative-draft-model-quantization unquant"
+	fi
+
+	export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --trust-remote-code --disable-radix-cache --attention-backend minicpm_flashinfer --chunked-prefill-size 32768 --max-prefill-tokens 32768 --prefill-max-requests 1 --max-running-requests 24 --mem-fraction-static 0.84 --schedule-conservativeness 1.0 --dense-as-sparse --quantization gptq_marlin --force-dense-minicpm --kv-cache-dtype fp8_e5m2${FUSED_QK_NORM_ROPE_ARG} --enable-torch-compile --torch-compile-max-bs 8 --enable-mixed-chunk${EAGLE3_ARGS}"
 fi
 
 # export SGLANG_SERVER_ARGS="${SGLANG_SERVER_ARGS:-} --log-level info"
