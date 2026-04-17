@@ -15,6 +15,7 @@
 
 import logging
 import math
+import os
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
@@ -821,7 +822,8 @@ class MiniCPMForCausalLM(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
 
-        self._fold_scaling_factors()
+        if os.environ.get("SGLANG_MINICPM_FOLD_SCALING", "0") in ("1", "true", "True"):
+            self._fold_scaling_factors()
 
     def _fold_scaling_factors(self):
         """Fold residual_scale, scale_emb, and scale_width into weights at load
