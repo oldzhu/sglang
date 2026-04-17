@@ -821,6 +821,8 @@ class MiniCPMForCausalLM(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
 
+        self._fold_scaling_factors()
+
     def _fold_scaling_factors(self):
         """Fold residual_scale, scale_emb, and scale_width into weights at load
         time to eliminate per-token scalar multiply kernels at runtime.
@@ -829,9 +831,9 @@ class MiniCPMForCausalLM(nn.Module):
         scales of o_proj and down_proj.  For full-precision layers (embed_tokens,
         lm_head), the weight tensors are scaled directly.
 
-        This is mathematically exact: scalar multiplication commutes with all
-        Marlin kernel transformations (permutation, dequantization).
-        """
+        Called at the end of load_weights(), before process_weights_after_loading.
+        This is safe because scalar multiplication commutes with all Marlin
+        kernel transformations (permutation, repacking, dequantization)."""
         residual_scale = self.config.scale_depth / math.sqrt(
             self.config.num_hidden_layers
         )
@@ -861,12 +863,6 @@ class MiniCPMForCausalLM(nn.Module):
             f"Folded scaling factors: residual_scale={residual_scale:.6f}, "
             f"scale_emb={scale_emb}, scale_width={scale_width}"
         )
-
-    def post_load_weights(self):
-        """Called after all weights are loaded and process_weights_after_loading
-        has run on quantized layers.  This is the right time to fold scaling
-        factors into the (now fully-processed) Marlin dequantization scales."""
-        self._fold_scaling_factors()
 
 class MiniCPMSALAForCausalLM(MiniCPMForCausalLM):
     pass
