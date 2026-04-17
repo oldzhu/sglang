@@ -770,6 +770,14 @@ def _sanitize_model_config_for_gptq(config: dict) -> Tuple[dict, List[str], dict
         sanitized.pop("rope_type", None)
         changes.append("removed top-level rope_type from GPTQ temp config")
 
+    force_dense = _env_truthy("SOAR_GPTQ_FORCE_DENSE", default=True)
+    if force_dense and sanitized.get("sparse_config") is not None:
+        sanitized["sparse_config"] = None
+        changes.append(
+            "set sparse_config=null to force dense attention during GPTQ calibration "
+            "(matches --force-dense-minicpm inference mode)"
+        )
+
     sanitized_snapshot = _rope_debug_snapshot(sanitized)
     return sanitized, changes, raw_snapshot, sanitized_snapshot
 

@@ -37,6 +37,8 @@ Every test run should be logged here with its configuration, commit, date, and r
 | 18 | 2026-04-14 | a9f4d43cb | 223.167.85.181 | torch.compile (max-bs=8) + CHANGE_0075 + dense+FP8 | 78.18% | ~97.7% | 0.92 | 50.00% | 78.67% | 98.89% | 100% | 63.33% | 3268s | 496.27 | **mcq dropped to 50%** (from 63%); torch.compile may be causing MCQ regression; C drops from 1.0→0.92; net negative |
 | 18b | 2026-04-14 | a9f4d43cb | 223.167.85.181 | torch.compile (max-bs=8) re-run | **79.38%** | **99.22%** | **1.0** | 63.33% | 74.67% | 98.89% | 100% | 60.00% | — | 523.00 | **mcq recovered to 63.33%**; Test 18 mcq=50% was variance; C=1.0 restored; torch.compile is SAFE |
 | 20 | 2026-04-15 | 9f9b02c52 | 223.167.85.181 | CHANGE_0085: mixed-chunk + max-running-requests=24 | **80.64%** | **100.80%** | **1.0** | 63.33% | 77.67% | 98.89% | 100% | 63.33% | 3171s | 501.00 | Accuracy improved; C=1.0 maintained; config also includes torch.compile(max-bs=8) |
+| 21 | 2026-04-16 | nvfp4 branch | 223.167.85.181 | **NVFP4 W4A4** (modelopt, block_size=16, FP8 KV, dense) | **~12%** | **~15%** | **0** | 0.00% | 7.00% | 50.00% | 0.00% | 3.33% | ~7200s | 1636 | **CATASTROPHIC**: FP4 quantization destroys reasoning; avg output 30k-54k tokens (infinite think loops); decode throughput excellent (1636 tok/s) but accuracy unusable; 5 requests timed out (3000s) |
+| 23 | 2026-04-17 | f373fbade | 223.167.85.181 | CHANGE_0100: residual scale folding + GPTQ + FP8 KV + dense + torch.compile(max-bs=8) + mixed-chunk | **78.64%** | **98.30%** | **0.96** | 56.67% | 81.00% | 98.89% | 100% | 56.67% | 3234s | 492.87 | Accuracy regression vs Test 20; C drops to 0.96 (not submission-safe yet) |
 
 ---
 
@@ -60,6 +62,8 @@ Every test run should be logged here with its configuration, commit, date, and r
 | 19-C | 2026-04-15 | 23d1c8ecf | chunk_size=64, threshold=64 | 112.95s | — | — | — | No change vs baseline |
 | 19-D | 2026-04-15 | 23d1c8ecf | chunk_size=64, threshold=256 | 112.97s | 41.54s | — | — | No change vs baseline |
 | 20-spd | 2026-04-15 | 9f9b02c52 | CHANGE_0085: mixed-chunk + max-running-req=24 + torch.compile(max-bs=8) | **113.67s** | **41.07s** | **34.15s** | — | S1 ~same, S8 -1.2%, **Smax -4.0%** vs Test 19; mixed-chunk helps Smax most |
+| 22-acc | 2026-04-17 | 548c8c153 | EAGLE3 spec-decode (untrained draft, mem-frac=0.72) | 187.01s | — | — | 74.33% / 92.92% / C=0 | **EAGLE3 FAIL**: accept_rate=0.26 (random draft), MCQ accuracy 56.67% (vs 76.67% baseline), S1 65% slower. C=0 → eliminated |
+| 23-spd | 2026-04-17 | f373fbade | CHANGE_0100: residual scale folding + dense+FP8 + torch.compile(max-bs=8) + mixed-chunk | **112.55s** | **41.04s** | **34.58s** | — | vs Test 20: S1 -1.0%, S8 ~flat, Smax +1.3% slower; net speed change negligible |
 
 ---
 
@@ -81,6 +85,15 @@ Every test run should be logged here with its configuration, commit, date, and r
 - **New**: 223.167.85.183:20685 (active, has GPTQ model)
 
 ---
+
+## Official Submission Results
+
+| Submission | Date | Package Config | acc_ori | acc (normalized) | C | S1 | S8 | Smax | final_score | Rank | Notes |
+|------------|------|----------------|---------|------------------|---|----|----|------|-------------|------|-------|
+| v18-A | 2026-04-15 | torch.compile(max-bs=8)+GPTQ+FP8+dense | 78.71 | 98.39% | 0.96 | 426.06s | 620.73s | 1169.84s | 52.94 | #19 | C=0.96 penalty |
+| v18-B (resub) | 2026-04-15 | same package as v18-A | 80.51 | 100.0% | 1.0 | 429.28s | 624.24s | 1171.49s | 51.08 | #18 | C=1.0 but score dropped (other teams improved Duration_best) |
+
+**Key insight**: Same package gives different accuracy across submissions (78.71→80.51). Official accuracy has variance — likely related to submission time (morning vs afternoon per user observation). Speed times are very similar (~0.5% variance). Score declined despite better C because competing teams improved their speeds (lowering Duration_best in formula).
 
 ## Notes
 - Tests 1-7 were on old fcloud instance with potentially different GPTQ model preparation

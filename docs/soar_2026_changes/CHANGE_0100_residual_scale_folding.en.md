@@ -92,12 +92,24 @@ python3 scripts/fcloud/fcloud_workflow.py speed --variant all
 
 | Metric | Baseline (Test 20) | After M1 | Delta |
 |---|---|---|---|
-| S1 | 113.67s | TBD | TBD |
-| S8 | 41.07s | TBD | TBD |
-| Smax | 34.15s | TBD | TBD |
-| Accuracy | 80.64% | TBD | TBD |
-| Normalized | 100.80% | TBD | TBD |
-| C | 1.0 | TBD | TBD |
+| S1 | 113.67s | 112.55s | -0.99% |
+| S8 | 41.07s | 41.04s | -0.07% |
+| Smax | 34.15s | 34.58s | +1.26% (slower) |
+| Accuracy | 80.64% | 78.64% | -2.00 pts |
+| Normalized | 100.80% | 98.30% | -2.50 pts |
+| C | 1.0 | 0.96 | dropped one tier |
+
+### Test 23 Details (2026-04-17, commit `f373fbade`)
+
+- Accuracy run duration: 3234.19s
+- Output TPS: 492.87 tokens/s
+- Per-task accuracy: cwe=81.00%, fwe=98.89%, mcq=56.67%, niah=100.00%, qa=56.67%
+
+### Conclusion
+
+M1 did **not** provide a stable net improvement on the current baseline stack. Speed impact is near noise level (small S1 gain, flat S8, slight Smax regression), while normalized accuracy dropped to 98.30% and reduced coefficient C from 1.0 to 0.96. This makes the current variant not submission-safe.
+
+Recommended action: keep CHANGE_0100 implementation for further debugging, but do not include it in submission path until accuracy is restored to normalized >99% (C=1.0).
 
 ## Rollback Instructions
 
