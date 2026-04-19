@@ -217,6 +217,14 @@ python3 scripts/fcloud/fcloud_workflow.py setup --force   # re-setup everything
 
 **IMPORTANT**: Always ask the user for explicit approval before running setup on any fcloud instance.
 
+## Optimization catalog (must reference)
+
+- The complete top-to-bottom optimization catalog for the baseline GPTQ + FP8 KV + dense config is maintained at:
+  `docs/soar_2026_changes/OPTIMIZATION_CATALOG_GPTQ_FP8_DENSE.md`
+- This catalog lists every known speed optimization vector (5 layers: scheduling → model → attention → kernels → GEMM), with priority ranking, expected gains, effort, and risk.
+- Before starting any new optimization, check this catalog to avoid duplicate work and follow the priority order.
+- After testing any optimization, update the catalog with actual results.
+
 ## Prioritization strategy
 
 1. Low-risk, high-impact runtime optimizations first.

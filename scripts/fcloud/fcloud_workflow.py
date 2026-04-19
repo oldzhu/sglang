@@ -218,6 +218,36 @@ def step_accuracy(base_url, token, timeout=3600):
     return out
 
 
+def step_quick_accuracy(base_url, token, task_filter=None, num_per_task=None, timeout=1200):
+    """Run quick accuracy evaluation with subset of data."""
+    label = "QUICK ACCURACY"
+    extra = ""
+    if task_filter:
+        extra += f" --task_filter {task_filter}"
+        label += f" (tasks={task_filter})"
+    if num_per_task:
+        extra += f" --num_samples_per_task {num_per_task}"
+        label += f" (per_task={num_per_task})"
+    if not task_filter and not num_per_task:
+        # Default quick mode: MCQ only (fastest, first 30 samples)
+        extra += " --task_filter mcq"
+        label += " (mcq-only)"
+    print_section(label)
+    fcloud_run(base_url, token,
+               'pkill -f "eval_model" 2>/dev/null; sleep 1; echo "cleaned"',
+               timeout=10)
+    cmd = (
+        f"cd {FCLOUD_DATA} && python3 eval_model_001.py "
+        f"--api_base {API_BASE} "
+        f"--model_path {MODEL_PATH} "
+        f"--data_path {FCLOUD_DATA}/perf_public_set.jsonl "
+        f"--concurrency 32{extra} 2>&1"
+    )
+    _, out = fcloud_run(base_url, token, cmd, timeout=timeout)
+    print(out)
+    return out
+
+
 def step_speed(base_url, token, variant="s1", timeout=600):
     """Run speed benchmark."""
     print_section(f"SPEED TEST: {variant}")
@@ -517,6 +547,10 @@ def main():
     sub.add_parser("wait-server", help="Wait for server to be ready")
     sub.add_parser("accuracy", help="Run accuracy test")
 
+    p_qacc = sub.add_parser("quick-accuracy", help="Quick accuracy test (subset)")
+    p_qacc.add_argument("--tasks", type=str, default=None, help="Comma-separated task types (e.g. mcq,qa,cwe)")
+    p_qacc.add_argument("--per-task", type=int, default=None, help="Max samples per task type")
+
     p_speed = sub.add_parser("speed", help="Run speed benchmark")
     p_speed.add_argument("--variant", choices=["s1", "s8", "smax", "all"], default="s1")
 
@@ -541,6 +575,8 @@ def main():
         step_wait_server(base_url, token)
     elif args.action == "accuracy":
         step_accuracy(base_url, token)
+    elif args.action == "quick-accuracy":
+        step_quick_accuracy(base_url, token, task_filter=args.tasks, num_per_task=args.per_task)
     elif args.action == "speed":
         step_speed(base_url, token, args.variant)
     elif args.action == "server-logs":

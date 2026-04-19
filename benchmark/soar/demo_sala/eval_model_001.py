@@ -167,6 +167,8 @@ def parse_args():
     parser.add_argument('--max_seq_len', type=int, default=262144)
     parser.add_argument('--concurrency', type=int, default=8, help="Number of concurrent API requests")
     parser.add_argument('--num_samples', type=int, default=None, help="Number of samples to test")
+    parser.add_argument('--task_filter', type=str, default=None, help="Comma-separated task types to include (e.g. mcq,qa,cwe)")
+    parser.add_argument('--num_samples_per_task', type=int, default=None, help="Max samples per task type (stratified sampling)")
     parser.add_argument('--verbose', action='store_true', help="Print per-sample details")
     return parser.parse_args()
 
@@ -308,11 +310,29 @@ def main():
     dataset = []
     if os.path.exists(args.data_path):
         with open(args.data_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    dataset.append(json.loads(line))
-                    if args.num_samples and len(dataset) >= args.num_samples:
-                        break
+            all_items = [json.loads(line) for line in f if line.strip()]
+
+        # Apply task filter
+        task_filter = None
+        if args.task_filter:
+            task_filter = set(t.strip().lower() for t in args.task_filter.split(','))
+            all_items = [item for item in all_items if item.get('task', '').lower() in task_filter]
+
+        # Apply per-task sample limit (stratified)
+        if args.num_samples_per_task:
+            from collections import defaultdict
+            by_task = defaultdict(list)
+            for item in all_items:
+                by_task[item.get('task', 'unknown')].append(item)
+            all_items = []
+            for task_items in by_task.values():
+                all_items.extend(task_items[:args.num_samples_per_task])
+
+        # Apply global sample limit
+        if args.num_samples:
+            all_items = all_items[:args.num_samples]
+
+        dataset = all_items
     else:
         raise FileNotFoundError(f"Data file not found: {args.data_path}")
 

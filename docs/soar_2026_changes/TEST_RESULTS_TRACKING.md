@@ -39,6 +39,7 @@ Every test run should be logged here with its configuration, commit, date, and r
 | 20 | 2026-04-15 | 9f9b02c52 | 223.167.85.181 | CHANGE_0085: mixed-chunk + max-running-requests=24 | **80.64%** | **100.80%** | **1.0** | 63.33% | 77.67% | 98.89% | 100% | 63.33% | 3171s | 501.00 | Accuracy improved; C=1.0 maintained; config also includes torch.compile(max-bs=8) |
 | 21 | 2026-04-16 | nvfp4 branch | 223.167.85.181 | **NVFP4 W4A4** (modelopt, block_size=16, FP8 KV, dense) | **~12%** | **~15%** | **0** | 0.00% | 7.00% | 50.00% | 0.00% | 3.33% | ~7200s | 1636 | **CATASTROPHIC**: FP4 quantization destroys reasoning; avg output 30k-54k tokens (infinite think loops); decode throughput excellent (1636 tok/s) but accuracy unusable; 5 requests timed out (3000s) |
 | 23 | 2026-04-17 | f373fbade | 223.167.85.181 | CHANGE_0100: residual scale folding + GPTQ + FP8 KV + dense + torch.compile(max-bs=8) + mixed-chunk | **78.64%** | **98.30%** | **0.96** | 56.67% | 81.00% | 98.89% | 100% | 56.67% | 3234s | 492.87 | Accuracy regression vs Test 20; C drops to 0.96 (not submission-safe yet) |
+| 24 | 2026-04-18 | 96304f9cd | 223.167.85.181 | CHANGE_0110: **dense-calibrated GPTQ** + FP8 KV + dense + torch.compile(max-bs=8) + mixed-chunk | **77.64%** | **97.05%** | **0.92** | **50.00%** | 79.33% | 98.89% | 100% | 60.00% | 3059s | — | **FAILED**: Dense calibration made accuracy WORSE; mcq crashed to 50%; C=0.92 |
 
 ---
 
@@ -64,6 +65,7 @@ Every test run should be logged here with its configuration, commit, date, and r
 | 20-spd | 2026-04-15 | 9f9b02c52 | CHANGE_0085: mixed-chunk + max-running-req=24 + torch.compile(max-bs=8) | **113.67s** | **41.07s** | **34.15s** | — | S1 ~same, S8 -1.2%, **Smax -4.0%** vs Test 19; mixed-chunk helps Smax most |
 | 22-acc | 2026-04-17 | 548c8c153 | EAGLE3 spec-decode (untrained draft, mem-frac=0.72) | 187.01s | — | — | 74.33% / 92.92% / C=0 | **EAGLE3 FAIL**: accept_rate=0.26 (random draft), MCQ accuracy 56.67% (vs 76.67% baseline), S1 65% slower. C=0 → eliminated |
 | 23-spd | 2026-04-17 | f373fbade | CHANGE_0100: residual scale folding + dense+FP8 + torch.compile(max-bs=8) + mixed-chunk | **112.55s** | **41.04s** | **34.58s** | — | vs Test 20: S1 -1.0%, S8 ~flat, Smax +1.3% slower; net speed change negligible |
+| 24-spd | 2026-04-18 | 96304f9cd | CHANGE_0110: **dense-calibrated GPTQ** + FP8 KV + dense + torch.compile(max-bs=8) + mixed-chunk | **110.59s** | **40.45s** | **33.64s** | — | vs Test 20: S1 -2.7%, S8 -1.5%, Smax -1.5%; speed slightly better but accuracy killed (77.64%); **NOT viable** |
 
 ---
 

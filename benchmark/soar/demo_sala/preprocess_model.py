@@ -91,6 +91,16 @@ def _parse_int_env(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer, got: {value}") from exc
 
 
+def _parse_float_env(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return float(value.strip())
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a float, got: {value}") from exc
+
+
 def _parse_optional_int_list_env(name: str) -> Optional[List[int]]:
     value = os.environ.get(name)
     if value is None:
@@ -888,7 +898,13 @@ def run_gptq_quantization(
         if layer_aware
         else None
     )
-    quant_config = QuantizeConfig(bits=bits, group_size=group_size, dynamic=dynamic_rules)
+    quant_config = QuantizeConfig(
+        bits=bits,
+        group_size=group_size,
+        dynamic=dynamic_rules,
+        damp_percent=_parse_float_env("SOAR_GPTQ_DAMP_PERCENT", 0.05),
+        mse=_parse_float_env("SOAR_GPTQ_MSE", 0.0),
+    )
 
     trust_remote_code = _env_truthy("SOAR_TRUST_REMOTE_CODE", default=True)
     attn_impl = os.environ.get("SOAR_GPTQ_ATTN_IMPL", "flash_attention_2").strip()
@@ -899,6 +915,7 @@ def run_gptq_quantization(
         f"calibration_sampling={json.dumps(calibration_summary, sort_keys=True)} "
         f"trust_remote_code={trust_remote_code} attn_impl={attn_impl} "
         f"layer_aware={layer_aware} include={include_modules} exclude={exclude_modules} "
+        f"damp_percent={quant_config.damp_percent} mse={quant_config.mse} "
         f"dynamic_rules={dynamic_rules}"
     )
     print("[preprocess] GPTQ custom model support enabled for model_type=minicpm_sala")

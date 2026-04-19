@@ -89,21 +89,63 @@ python3 scripts/fcloud/fcloud_workflow.py speed --variant all
 
 ## Result Summary
 
-| Metric | Test 20 (sparse calib) | Test 24 (dense calib, TBD) | Test 25 (dense calib + M1, TBD) |
-|--------|----------------------|---------------------------|--------------------------------|
-| ori_accuracy | 80.64% | TBD | TBD |
-| normalized | 100.80% | TBD | TBD |
-| C | 1.0 | TBD | TBD |
-| S1 (s) | 113.67 | TBD | TBD |
-| S8 (s) | 41.07 | TBD | TBD |
-| Smax (s) | 34.15 | TBD | TBD |
+### Test 24: Dense-Calibrated GPTQ Baseline (no M1)
+
+| Metric | Test 20 (sparse calib) | Test 24 (dense calib) | Delta |
+|--------|----------------------|---------------------------|-------|
+| ori_accuracy | 80.64% | **77.64%** | **-3.00%** |
+| normalized | 100.80% | 97.05% | -3.75% |
+| C | 1.0 | **0.92** | **REGRESSION** |
+| mcq | 63.33% | **50.00%** | **-13.33%** |
+| qa | 63.33% | 60.00% | -3.33% |
+| cwe | 77.67% | 79.33% | +1.66% |
+| fwe | 98.89% | 98.89% | 0 |
+| niah | 100% | 100% | 0 |
+| S1 (s) | 113.67 | 110.59 | -2.7% (faster) |
+| S8 (s) | 41.07 | 40.45 | -1.5% (faster) |
+| Smax (s) | 34.15 | 33.64 | -1.5% (faster) |
+
+### Conclusion: **FAILED**
+
+Dense calibration made accuracy significantly **worse**, not better. The mcq accuracy crashed from 63.33% to 50.00% and overall C dropped from 1.0 to 0.92. Speed improved marginally (~1.5-2.7%) but cannot compensate for the accuracy catastrophe.
+
+**Key insight**: The original sparse-calibration GPTQ weights are actually **better** for dense inference than dense-calibrated weights. This is counter-intuitive but the GPTQ quantization grid optimized under sparse attention patterns generalizes well to dense inference. The sparse attention during calibration may act as a form of regularization, producing weight quantization that is more robust across attention patterns.
+
+Test 25 (M1 + dense calibration) was **skipped** since the baseline (Test 24) already showed unacceptable accuracy regression — adding M1 on top of bad weights would not produce meaningful results.
 
 ## Rollback Instructions
 
-Set `SOAR_GPTQ_FORCE_DENSE=0` in `prepare_env.sh` and re-quantize to restore sparse-calibrated weights.
+Set `SOAR_GPTQ_FORCE_DENSE=0` in `prepare_env.sh` and re-quantize to restore sparse-calibrated weights. The sparse-calibrated weights remain the production baseline.
 
 ## Next Steps
 
-- If dense calibration improves or maintains accuracy: adopt as new default, proceed to test M1 path
-- If M1 + dense calibration achieves normalized accuracy >99% (C=1.0): adopt M1 for submission
-- If accuracy still regresses with M1: move to next optimization priority (A1 or K4)
+- **Phase B**: Test dense calibration with tuning levers (`SOAR_GPTQ_DAMP_PERCENT`, `SOAR_GPTQ_MSE`) to recover accuracy while keeping speed benefit
+- Use `quick-accuracy --tasks mcq` (~3-5 min) for fast screening before full eval
+- If Phase B fails, revert `SOAR_GPTQ_FORCE_DENSE=0` and move to other optimizations
+
+## Appendix: Quick Accuracy Evaluation Methods Comparison
+
+Two approaches for quickly evaluating quantization quality before full accuracy runs (~50-60 min):
+
+### Method A: Task-Filter (Implemented)
+
+Run a subset of the actual eval tasks (e.g., MCQ-only, 30 samples, ~3-5 min).
+
+- **Pros**: Directly measures end-to-end accuracy; covers both prefill and decode; no setup needed
+- **Cons**: High variance (30 MCQ samples, each worth 3.33%); cannot reliably distinguish configs within ~10% accuracy noise; still requires generation (~6K tokens per MCQ sample)
+- **Usage**: `python3 scripts/fcloud/fcloud_workflow.py quick-accuracy --tasks mcq`
+
+### Method B: Logprob Distribution Comparison (Not yet implemented)
+
+Compare quantized model vs BF16 baseline via logprobs distribution (KL divergence, cosine similarity). Reference: 曹议 (SOAR 2026 Week 3 champion blog), inspired by "Accuracy is Not All You Need" paper.
+
+- **Approach**: One-time BF16 baseline (greedy decode, extract top-256 logprobs of last 128 tokens). Per-config: send same prompts, compare distributions.
+- **Pros**: Very fast (seconds-minutes, prefill only); stable continuous metric — can reliably rank configs; zero GPU for baseline data
+- **Cons**: Prefill-only — no decode error propagation coverage; doesn't directly predict competition accuracy score; requires one-time BF16 baseline setup
+- **When to implement**: If we need to compare >5 calibration configs, where MCQ noise makes task-filter unreliable for ranking
+
+### Recommended Workflow
+
+1. **Logprob** (if implemented) → screen and rank many configs quickly
+2. **Task-filter** → validate top candidates pass accuracy threshold
+3. **Full eval** → final verification before submission
