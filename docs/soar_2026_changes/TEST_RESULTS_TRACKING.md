@@ -66,6 +66,10 @@ Every test run should be logged here with its configuration, commit, date, and r
 | 22-acc | 2026-04-17 | 548c8c153 | EAGLE3 spec-decode (untrained draft, mem-frac=0.72) | 187.01s | — | — | 74.33% / 92.92% / C=0 | **EAGLE3 FAIL**: accept_rate=0.26 (random draft), MCQ accuracy 56.67% (vs 76.67% baseline), S1 65% slower. C=0 → eliminated |
 | 23-spd | 2026-04-17 | f373fbade | CHANGE_0100: residual scale folding + dense+FP8 + torch.compile(max-bs=8) + mixed-chunk | **112.55s** | **41.04s** | **34.58s** | — | vs Test 20: S1 -1.0%, S8 ~flat, Smax +1.3% slower; net speed change negligible |
 | 24-spd | 2026-04-18 | 96304f9cd | CHANGE_0110: **dense-calibrated GPTQ** + FP8 KV + dense + torch.compile(max-bs=8) + mixed-chunk | **110.59s** | **40.45s** | **33.64s** | — | vs Test 20: S1 -2.7%, S8 -1.5%, Smax -1.5%; speed slightly better but accuracy killed (77.64%); **NOT viable** |
+| 25-spd | 2026-04-20 | (local) | Baseline verification: prefill-max-req=1, sched-cons=1.0, chunk=32K | 120.48s | 40.49s | 33.67s | — | Matches Test 20 baseline (new fcloud instance) |
+| 25A-spd | 2026-04-20 | (local) | **prefill-max-req=4, sched-cons=0.8**, chunk=32K | **110.58s** | 40.53s | 33.58s | — | **S1 -8.2%**, S8/Smax unchanged |
+| 25B-spd | 2026-04-20 | (local) | prefill-max-req=4, sched-cons=0.8, **chunk=65K** | **110.54s** | 40.54s | 33.59s | — | Chunk=65K: same as 32K on old data (inputs too short to matter) |
+| 25C-spd | 2026-04-20 | (local) | prefill-max-req=8, sched-cons=0.5, chunk=65K | **110.53s** | 40.54s | 33.54s | — | More aggressive: no further gain, plateau at ~110.5s |
 
 ---
 

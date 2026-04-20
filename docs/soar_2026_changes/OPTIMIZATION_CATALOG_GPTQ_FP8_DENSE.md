@@ -1,7 +1,9 @@
 # Complete Optimization Catalog: GPTQ + FP8 KV + Dense Mode
 
-> **Created**: 2026-04-14  
+> **Created**: 2026-04-14 | **Updated**: 2026-04-20  
 > **Baseline**: Test 12 — S1=121.71s, S8=44.09s, Smax=35.86s, ori_accuracy=79.29%, normalized=99.11%, C=1.0  
+> **Best config (2026-04-20)**: prefill-max-req=4, sched-cons=0.8, chunk=65536, torch.compile(max-bs=8), mixed-chunk  
+> **Official score**: 40.23 (#19) after new long-context dataset rerun  
 > **Config**: `--quantization gptq_marlin --force-dense-minicpm --kv-cache-dtype fp8_e5m2`  
 > **Architecture**: MiniCPM-SALA — 32 layers (8 standard attention + 24 SimpleGLA lightning/recurrent)
 
@@ -127,10 +129,10 @@ This document catalogs **every known speed optimization vector** for our baselin
 | Priority | ID | Optimization | Expected Gain | Status |
 |----------|----|-------------|---------------|--------|
 | 1 | S1 | `--enable-torch-compile --torch-compile-max-bs 8` | **5-7%** | ✅ DONE (Test 18, -7.4%/-6.6%/-1.5%) |
-| 2 | S2 | `--enable-mixed-chunk` | **3-5%** | ⬜ Not tested |
+| 2 | S2 | `--enable-mixed-chunk` | **3-5%** | ✅ DONE (Test 20, Smax -4.0%) |
 | 3 | A4 | Recurrent threshold tuning (64/96/192) | ~~1-3%~~ **0%** | ❌ TESTED — no gain |
-| 4 | S3 | `--prefill-max-requests 2` | **5-10%** | ⬜ Not tested |
-| 5 | S4 | `--schedule-conservativeness 0.95` | **3-5%** | ⬜ Not tested |
+| 4 | S3 | `--prefill-max-requests 4` | **5-10%** | ✅ DONE (Test 25A, S1 -8.2%) |
+| 5 | S4 | `--schedule-conservativeness 0.8` | **3-5%** | ✅ DONE (Test 25A, part of S3 combo) |
 
 ### Tier 2: Quick Code Changes (1-2 days, low risk)
 | Priority | ID | Optimization | Expected Gain | Status |
@@ -163,7 +165,33 @@ If all optimizations succeed (optimistic):
 - Tier 4 (major): ~12-20%
 - **Total theoretical**: ~40-70% (multiplicative, not additive)
 
-**Reality check**: Optimizations often don't stack linearly. A realistic target combining Tier 1 + Tier 2 + partial Tier 3 is **20-35%** speedup, which would bring our score from ~56.63 to ~73-76 — approaching but not quite reaching #5 (79.55). Tier 4 work may be needed for the remaining gap.
+**Reality check**: Optimizations often don't stack linearly. A realistic target combining Tier 1 + Tier 2 + partial Tier 3 is **20-35%** speedup. With score at 40.23 (#19) after new long-context dataset rerun, we need **~37.7% faster** to reach #5 (64.58). Tier 1 config tuning is now largely exhausted (+8.2% S1). Remaining gap requires kernel-level work (Tier 3+4) or alternative quantization (FP8 weights).
+
+---
+
+## Strategic Assessment (Updated 2026-04-20)
+
+### New Dataset Impact
+The competition deployed a new long-context speed dataset (2026-04-15): **68% of inputs are 32K-512K tokens**. This fundamentally shifts the optimization target from decode throughput to **prefill throughput**. Our config changes (chunk=65536, prefill-max-requests=4) showed no gain on old data (max ~7K token inputs) but will have significant impact on the new long-context workload.
+
+### Config Tuning Status: EXHAUSTED
+All Layer 1 (scheduling) optimizations have been tested:
+- S1 torch.compile: +7.4% S1 ✅
+- S2 mixed-chunk: +4.0% Smax ✅
+- S3 prefill-max-requests=4: **+8.2% S1** ✅
+- S4 schedule-conservativeness=0.8: combined with S3 ✅
+- S5 max-running-requests=24: included ✅
+- No further config-only gains available.
+
+### NVFP4 Status: NOT VIABLE
+Test 21 showed catastrophic accuracy failure (~12%) with W4A4 FP4 quantization. Model generates infinite `<think>` loops. FP4 is too aggressive for this reasoning architecture. Mixed-precision NVFP4 (per-layer exclusion) would require major engineering.
+
+### Priority Paths Forward
+1. **Submit with best config** (immediate) — prefill-max-req=4, sched-cons=0.8, chunk=65536
+2. **FLA/SimpleGLA kernel optimization** (this week) — 75% of forward pass time; A1 state contiguity, A3 fused state I/O
+3. **Blackwell GEMM tuning** (next week) — profile Marlin SM120 auto-config optimality
+4. **FP8 weight quantization** (alternative) — W8A16 less aggressive than FP4
+5. **EAGLE3 spec decode** (if time) — diminished returns on prefill-dominant workload
 
 ---
 
